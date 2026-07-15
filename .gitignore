@@ -1,0 +1,55 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+wheels/
+*.egg-info/
+*.egg
+share/python-wheels/
+
+# Unit test / coverage
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Jupyter / IPython
+.ipynb_checkpoints
+profile_default/
+
+# Logs and local eval outputs (large, derived)
+*.log
+logs/
+results/
+results_readable/
+
+# Editor / OS
+.DS_Store
+
+# Lab-internal tooling and local notes: kept locally, never tracked in the public
+# repo. The website (index.html, assets/) lives in fin-ai-lab/frontier-to-pit-website.
+tools/
+docs/
+scripts/
+documents/
+diagnostics/
+.claude/
+CLAUDE.md
+ask.sh

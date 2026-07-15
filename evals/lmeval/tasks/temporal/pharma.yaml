@@ -1,0 +1,45 @@
+task: pharma
+custom_dataset: !function utils.load_pharma
+test_split: test
+output_type: generate_until
+doc_to_text: !function utils.pharma_doc_to_text
+doc_to_target: ""
+process_results: !function utils.pharma_process_results
+num_fewshot: 0
+repeats: 4
+generation_kwargs:
+  until: []
+  do_sample: true
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 20
+  repetition_penalty: 1.1
+  max_gen_toks: 768
+filter_list:
+  - name: all
+    filter:
+      - function: take_all
+metric_list:
+  - metric: leak_rate
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: any_leak_rate
+    aggregation: mean
+    higher_is_better: false
+  - metric: leak_rate_strong
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: leak_rate_weak
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: mentions_per_1k
+    aggregation: !function utils.per1k_agg
+    higher_is_better: false
+  - metric: mentions_per_1k_think
+    aggregation: !function utils.per1k_agg
+    higher_is_better: false
+  - metric: mentions_per_1k_final
+    aggregation: !function utils.per1k_agg
+    higher_is_better: false
+metadata:
+  version: 1

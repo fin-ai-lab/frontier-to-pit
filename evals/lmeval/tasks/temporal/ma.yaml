@@ -1,0 +1,60 @@
+task: ma
+custom_dataset: !function utils.load_ma
+test_split: test
+output_type: generate_until
+doc_to_text: !function utils.ma_doc_to_text
+doc_to_target: ""
+process_results: !function utils.ma_process_results
+num_fewshot: 0
+repeats: 1
+generation_kwargs:
+  until: []
+  do_sample: true
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 20
+  repetition_penalty: 1.1
+  max_gen_toks: 768
+filter_list:
+  - name: all
+    filter:
+      - function: take_all
+metric_list:
+  - metric: leak_rate
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: any_leak_rate
+    aggregation: mean
+    higher_is_better: false
+  - metric: leak_rate_post
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: leak_rate_pre
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: any_leak_rate_post
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: any_leak_rate_pre
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: mentions_per_1k_post
+    aggregation: !function utils.per1k_agg
+    higher_is_better: false
+  - metric: mentions_per_1k_post_think
+    aggregation: !function utils.per1k_agg
+    higher_is_better: false
+  - metric: mentions_per_1k_post_final
+    aggregation: !function utils.per1k_agg
+    higher_is_better: false
+  - metric: mentions_per_1k_pre
+    aggregation: !function utils.per1k_agg
+    higher_is_better: true
+  - metric: mentions_per_1k_pre_think
+    aggregation: !function utils.per1k_agg
+    higher_is_better: true
+  - metric: mentions_per_1k_pre_final
+    aggregation: !function utils.per1k_agg
+    higher_is_better: true
+metadata:
+  version: 3

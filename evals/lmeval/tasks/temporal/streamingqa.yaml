@@ -1,0 +1,42 @@
+task: streamingqa
+custom_dataset: !function utils.load_streamingqa
+test_split: test
+output_type: generate_until
+doc_to_text: !function utils.streamingqa_doc_to_text
+doc_to_target: ""
+process_results: !function utils.streamingqa_process_results
+num_fewshot: 0
+repeats: 1
+generation_kwargs:
+  until: []
+  do_sample: true
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 20
+  repetition_penalty: 1.1
+  max_gen_toks: 64
+filter_list:
+  - name: all
+    filter:
+      - function: take_all
+metric_list:
+  - metric: leak_rate
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: any_leak_rate
+    aggregation: mean
+    higher_is_better: false
+  - metric: leak_rate_2020
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: leak_rate_2016_2019
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: leak_rate_forget
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: leak_rate_retain
+    aggregation: !function utils.ratio_agg
+    higher_is_better: true
+metadata:
+  version: 1

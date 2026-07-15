@@ -1,0 +1,100 @@
+import pytest
+
+from ftp import DDConfig
+
+
+def make_cfg(**kw):
+    return DDConfig(aux_p="org/aux-p", aux_q="org/aux-q", **kw)
+
+
+def test_env_round_trip():
+    cfg = make_cfg(
+        window=1024,
+        alpha_default=1.0,
+        suppress_tokens=("<think>", 42),
+        tokenizer="org/tok",
+        dtype="float16",
+        compile_aux=True,
+        prewarm=16,
+        mode="universal",
+        max_feeds_per_step=2,
+        fuse_aux="off",
+        retemplate="gemma",
+    )
+    assert DDConfig.from_env(cfg.to_env()) == cfg
+
+
+def test_env_round_trip_defaults():
+    cfg = make_cfg()
+    assert DDConfig.from_env(cfg.to_env()) == cfg
+
+
+def test_from_env_minimal():
+    cfg = DDConfig.from_env({"DD_AUX_P": "p", "DD_AUX_Q": "q"})
+    assert cfg.aux_p == "p"
+    assert cfg.suppress_tokens == ()
+    assert cfg.tokenizer_path == "p"
+    assert cfg.mode == "auto"
+    assert cfg.max_feeds_per_step == 3
+    assert cfg.fuse_aux == "auto"
+
+
+def test_from_env_missing_required():
+    with pytest.raises(KeyError):
+        DDConfig.from_env({"DD_AUX_P": "p"})
+
+
+def test_apply_env():
+    env: dict[str, str] = {}
+    make_cfg(window=512).apply_env(env)
+    assert env["DD_WINDOW"] == "512"
+    assert env["DD_AUX_P"] == "org/aux-p"
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"window": 1},
+        {"alpha_default": -1.0},
+        {"prewarm": -1},
+        {"mode": "hybrid"},
+        {"max_feeds_per_step": 0},
+        {"fuse_aux": "maybe"},
+    ],
+)
+def test_validation(kw):
+    with pytest.raises(ValueError):
+        make_cfg(**kw)
+
+
+def test_requires_aux_paths():
+    with pytest.raises(ValueError):
+        DDConfig(aux_p="", aux_q="q")
+
+
+def test_suppress_token_parsing():
+    cfg = DDConfig.from_env(
+        {"DD_AUX_P": "p", "DD_AUX_Q": "q", "DD_SUPPRESS_TOKENS": "<think>, 42 ,-1"}
+    )
+    assert cfg.suppress_tokens == ("<think>", 42, -1)
+
+
+def test_resolve_suppress_ids():
+    class FakeTok:
+        unk_token_id = 0
+
+        def convert_tokens_to_ids(self, t):
+            return {"<think>": 7}.get(t, 0)
+
+    cfg = make_cfg(suppress_tokens=("<think>", 99))
+    assert cfg.resolve_suppress_ids(FakeTok()) == [7, 99]
+
+    bad = make_cfg(suppress_tokens=("<nope>",))
+    with pytest.raises(ValueError):
+        bad.resolve_suppress_ids(FakeTok())
+
+
+def test_aux_device_round_trip():
+    cfg = make_cfg(aux_device="cuda:1")
+    assert DDConfig.from_env(cfg.to_env()) == cfg
+    assert DDConfig.from_env(make_cfg().to_env()).aux_device is None
