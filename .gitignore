@@ -53,3 +53,6 @@ diagnostics/
 .claude/
 CLAUDE.md
 ask.sh
+
+# Competitor repos cloned locally for verification runs (not ours to redistribute)
+Point-In-Time-LLM/
