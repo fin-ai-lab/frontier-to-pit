@@ -21,8 +21,10 @@ stop just that reply (Ctrl-C can't — vLLM's engine-core subprocess catches SIG
 shuts down, ending the session). Quit with 'exit'/'quit'/'q' or Ctrl-D.
 
 Defaults reproduce the benchmarked config: bf16 P (Qwen/Qwen3.5-27B), DD alpha=1.5,
-steer L48:28961@10, thinking OFF — the same P precision, sampling and <think> ban as
-evals/lmeval, so run.py matches the benchmarks. --think flips the session to reasoning
+steer L48:28961@10, thinking OFF, and the benchmarks' forecasting system prompt on
+every turn (the point-in-time-expert preamble baked into the temporal eval datasets;
+--no-system-prompt drops it, --system-prompt replaces it) — the same P precision,
+sampling and <think> ban as evals/lmeval, so run.py matches the benchmarks. --think flips the session to reasoning
 mode (real <think> block, no ban, bigger budgets — mirroring the evals'
 qwen3_5_27b_think arm); DD + steering are calibrated NOTHINK, so --think is
 exploratory, not a benchmarked config. Pass --model Qwen/Qwen3.5-27B-FP8 for FP8
@@ -43,6 +45,7 @@ import uuid
 from transformers import AutoTokenizer
 from vllm import SamplingParams
 
+from ftp.prompts import FORECAST_SYSTEM_PROMPT
 from ftp.serve import (
     SteerArgs,
     build_async_llm,
@@ -82,6 +85,14 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--sae-dir", default=None, help="local dir of layer{L}.sae.pt (vs --sae-repo)")
     ap.add_argument("--no-dd", action="store_true")
     ap.add_argument("--no-steer", action="store_true")
+    # The forecasting system prompt served with every ma/pharma/covid benchmark
+    # generation (baked into the eval parquets' system_prompt column; canonical text in
+    # ftp.prompts). ON by default so demo replies are prompted like the benchmarks.
+    ap.add_argument("--system-prompt", default=FORECAST_SYSTEM_PROMPT,
+                    help="system message for every turn (default: the benchmarks' "
+                         "forecasting point-in-time prompt)")
+    ap.add_argument("--no-system-prompt", action="store_true",
+                    help="send no system message at all")
     ap.add_argument("--think", action="store_true",
                     help="reasoning mode for the whole run: the chat template opens a real "
                          "<think> block instead of an empty one, the sampler-level <think> ban "
@@ -181,6 +192,12 @@ async def _run(args, prompt: str | None) -> None:
         print(f"[run] 🧠 thinking ON: real <think> block, max_new={max_new} "
               f"max_model_len={max_model_len} — EXPLORATORY: alpha/clamp are calibrated "
               f"NOTHINK, so this is off the benchmarked config", flush=True)
+    system_prompt = "" if args.no_system_prompt else args.system_prompt
+    if system_prompt:
+        tag = ("the benchmarks' forecasting point-in-time prompt"
+               if system_prompt == FORECAST_SYSTEM_PROMPT else "custom")
+        print(f"[run] system prompt on ({tag}) — --no-system-prompt to disable, "
+              f"--system-prompt to replace", flush=True)
 
     sp = SamplingParams(
         temperature=args.temperature, top_p=args.top_p, top_k=args.top_k,
@@ -200,6 +217,8 @@ async def _run(args, prompt: str | None) -> None:
         # <think></think> to the generation prompt (reasoning pre-closed), True leaves it
         # open for the model. DD's fuse_pin keeps <think>/</think> at P's probability, so
         # the delimiters survive DD either way.
+        if system_prompt:
+            messages = [{"role": "system", "content": system_prompt}, *messages]
         text = tok.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True, enable_thinking=args.think
         )

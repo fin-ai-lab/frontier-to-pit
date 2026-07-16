@@ -41,6 +41,12 @@ adheres to [Semantic Versioning](https://semver.org/).
     message are byte-identical to before.
   - Stale temporal results were deleted from the result stores; all temporal
     numbers must be regenerated on the new datasets.
+  - The demo tooling now serves the same forecasting system prompt by default:
+    `run.py` (both subcommands; `--no-system-prompt` / `--system-prompt` to
+    drop/replace) and the website-examples client (`ask.sh` /
+    `tools/websrv/client.py`, same flags). Canonical text lives in
+    `ftp.prompts.FORECAST_SYSTEM_PROMPT`; `tests/test_prompts.py` pins it
+    byte-identical to the datasets' `system_prompt` column.
 
 - **Aux engine replaced with a paged-KV design** (same class name and public
   API: `AuxBatchedEngine`; `PagedAuxEngine` kept as an alias). KV lives in
