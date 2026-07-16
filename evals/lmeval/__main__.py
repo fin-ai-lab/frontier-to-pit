@@ -500,6 +500,33 @@ MODELS["ftp_v6guard_think_L48c10_L27c0"] = {
     "alphas": [1.125],
 }
 
+# Guard hyperparameter sweep (2026-07-16, ma+pharma): the two residual failure
+# modes map onto two knobs. NONWORDS garble slips the zlib pre-gate — a half-
+# prose/half-garble window compresses ~1.3-1.4, under the 1.6 gate — so lower
+# gate_ratio shows the judge more windows (1.0 ~= gate off for prose-like text).
+# Long rescue sessions accumulate loop debris and run to the token budget, so
+# lower max_rounds gives up earlier and returns the clean accepted prefix.
+# One factor at a time plus both-lever combos; all else = the production guard.
+for _tag, _gk in {
+    "g13":    {"gate_ratio": 1.3},
+    "g10":    {"gate_ratio": 1.0},
+    "r10":    {"max_rounds": 10},
+    "r5":     {"max_rounds": 5},
+    "g13r10": {"gate_ratio": 1.3, "max_rounds": 10},
+    "g10r5":  {"gate_ratio": 1.0, "max_rounds": 5},
+}.items():
+    MODELS[f"ftp_v6guard_{_tag}_a1.5_L48c10_L27c0"] = {
+        "backend": "dd",
+        "args": {**_DD_QWEN_ARGS, "aux_p": _v6_pairs["partialsft"][0],
+                 "aux_q": _v6_pairs["partialsft"][1], "fuse_pin": True,
+                 "dd_guard": True, "dd_guard_kwargs": dict(_gk),
+                 "steer": SteerArgs(triples=[(48, 28961, 10.0)], family="topk",
+                                    sae_dir=_SAE_DIR)},
+        "gen_kwargs": {**QWEN_GEN, **QWEN_SAMPLING, "max_gen_toks": 4096},
+        "util_max_gen_toks": 16384,
+        "alphas": [1.5],
+    }
+
 # v3.3.1 = the chosen v3.3 "Ours" config RE-RUN under the v4 sampling policy (temp-1.0
 # preset, matched budgets) so the v3.3-vs-v4 aux comparison is decoding-matched — the
 # original v3.3 diamonds ran T=0.7/rep-pen 1.1/2048-tok utility gen. Aux pair = the
