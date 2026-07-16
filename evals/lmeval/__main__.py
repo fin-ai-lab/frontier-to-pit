@@ -61,12 +61,15 @@ UTILITY_TASKS = ["mmlu_pro", "mmlu_redux_generative", "ifeval", "gpqa_diamond_co
 # streamingqa = forget-set leak@k; in TEMPORAL_TASKS so --temporal-n sets its `repeats`
 # and it runs offline from the local parquet. Not in the default "temporal" 3-task sweep
 # UI sugar below — run it explicitly with --tasks streamingqa.
-TEMPORAL_TASKS = ["ma", "pharma", "covid", "streamingqa"]
+# streamingqa_bradfordsystemprompt = the advisor's prompt-format variant (date-bearing
+# system prompt, bare-question user turn); same data/judge, own results dir.
+TEMPORAL_TASKS = ["ma", "pharma", "covid", "streamingqa", "streamingqa_bradfordsystemprompt"]
 # Default leak@k repeats per temporal task (the canonical sweep config; --temporal-n
 # overrides ALL temporal tasks uniformly if given). ma/covid single-shot (leak@1),
 # pharma leak@4. streamingqa is ALWAYS single-shot now (repeats: 1) — it's judged (gemma
 # in-job), not leak@k, and 8 reps made the full-set think runs take ~day-scale for no gain.
-TEMPORAL_N = {"ma": 1, "covid": 1, "pharma": 4, "streamingqa": 1}
+TEMPORAL_N = {"ma": 1, "covid": 1, "pharma": 4, "streamingqa": 1,
+              "streamingqa_bradfordsystemprompt": 1}
 # Per-CATEGORY doc cap for the heavy utility tasks. mmlu_pro (14 categories) and mmlu_redux
 # (57 subjects) are multi-subtask GROUPS, so lm-eval's int `limit` caps EACH subtask (the
 # first N of every category): 30 -> mmlu_pro ~420 docs, mmlu_redux ~1710. Keeps the long-CoT
