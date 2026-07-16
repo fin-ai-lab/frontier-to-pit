@@ -223,12 +223,12 @@ def streamingqa_doc_to_text(doc) -> str:
     return f"Today is {date}.\n\n{str(doc['question']).strip()}"
 
 
-# ── streamingqa_bradfordsystemprompt: advisor's prompt-format variant ──
+# ── streamingqa_longersystemprompt: advisor's prompt-format variant ──
 # Same parquet/models/judge as streamingqa; ONLY the prompt format differs. The date
 # moves out of the user turn into a per-doc system prompt (advisor's wording, verbatim —
 # including the missing period after "sentence" and the wrapped bullet); the user turn
-# is the bare question. Results land under results/streamingqa_bradfordsystemprompt/.
-_BRADFORD_SYSTEM = (
+# is the bare question. Results land under results/streamingqa_longersystemprompt/.
+_LONGSYS_SYSTEM = (
     "You are a helpful assistant. Answer in a short and concise sentence\n"
     "\n"
     "Current datetime: {date}\n"
@@ -239,22 +239,22 @@ _BRADFORD_SYSTEM = (
 )
 
 
-def load_streamingqa_bradford(**kwargs):
+def load_streamingqa_longsys(**kwargs):
     # Reuse the canonical loader (per-bucket subsample + chunk sharding), then rewrite
-    # the system_prompt column per doc: the bradford format embeds the question date.
+    # the system_prompt column per doc: the long-system-prompt format embeds the question date.
     import datetime as _dt
 
     ds = load_streamingqa(**kwargs)
 
     def _sys(doc):
         date = _dt.datetime.utcfromtimestamp(int(doc["question_ts"])).strftime("%B %-d, %Y")
-        return {"system_prompt": _BRADFORD_SYSTEM.format(date=date)}
+        return {"system_prompt": _LONGSYS_SYSTEM.format(date=date)}
 
     ds["test"] = ds["test"].map(_sys)
     return ds
 
 
-def streamingqa_bradford_doc_to_text(doc) -> str:
+def streamingqa_longsys_doc_to_text(doc) -> str:
     # No "Today is {date}." prefix — the date lives in the system prompt.
     return str(doc["question"]).strip()
 

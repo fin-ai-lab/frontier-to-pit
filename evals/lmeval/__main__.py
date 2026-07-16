@@ -61,15 +61,15 @@ UTILITY_TASKS = ["mmlu_pro", "mmlu_redux_generative", "ifeval", "gpqa_diamond_co
 # streamingqa = forget-set leak@k; in TEMPORAL_TASKS so --temporal-n sets its `repeats`
 # and it runs offline from the local parquet. Not in the default "temporal" 3-task sweep
 # UI sugar below — run it explicitly with --tasks streamingqa.
-# streamingqa_bradfordsystemprompt = the advisor's prompt-format variant (date-bearing
+# streamingqa_longersystemprompt = the advisor's prompt-format variant (date-bearing
 # system prompt, bare-question user turn); same data/judge, own results dir.
-TEMPORAL_TASKS = ["ma", "pharma", "covid", "streamingqa", "streamingqa_bradfordsystemprompt"]
+TEMPORAL_TASKS = ["ma", "pharma", "covid", "streamingqa", "streamingqa_longersystemprompt"]
 # Default leak@k repeats per temporal task (the canonical sweep config; --temporal-n
 # overrides ALL temporal tasks uniformly if given). ma/covid single-shot (leak@1),
 # pharma leak@4. streamingqa is ALWAYS single-shot now (repeats: 1) — it's judged (gemma
 # in-job), not leak@k, and 8 reps made the full-set think runs take ~day-scale for no gain.
 TEMPORAL_N = {"ma": 1, "covid": 1, "pharma": 4, "streamingqa": 1,
-              "streamingqa_bradfordsystemprompt": 1}
+              "streamingqa_longersystemprompt": 1}
 # Per-CATEGORY doc cap for the heavy utility tasks. mmlu_pro (14 categories) and mmlu_redux
 # (57 subjects) are multi-subtask GROUPS, so lm-eval's int `limit` caps EACH subtask (the
 # first N of every category): 30 -> mmlu_pro ~420 docs, mmlu_redux ~1710. Keeps the long-CoT
@@ -414,7 +414,7 @@ MODELS["pit_4b_2015_chat_greedy"] = {
 # back-and-forth with the advisor — the steered config is NOT scored on streamingqa;
 # the unlearning figure's "Ours" is the pure-DD dose-response (ftp_qwen_v6_partialsft),
 # and no steered sqa arm exists in either prompt format. Same on the think/guard twins.
-_STEERED_SKIP_TASKS = ["streamingqa", "streamingqa_bradfordsystemprompt"]
+_STEERED_SKIP_TASKS = ["streamingqa", "streamingqa_longersystemprompt"]
 MODELS["ftp_v6lin_a1.5_L48c10_L27c0"] = {
     "backend": "dd",
     "args": {**_DD_QWEN_ARGS, "aux_p": _v6_pairs["partialsft"][0],
