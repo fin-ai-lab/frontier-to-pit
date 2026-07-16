@@ -378,6 +378,18 @@ MODELS["v6_partialsft_2015_temp0"] = {
 #                  isolates the prompt format alone. Greedy is HF's default, hence no
 #                  gen_kwargs (mirrors how `pit_4b_2015` gets greedy).
 # Same weights/context/budget as `pit_4b_2015` so nothing else moves.
+#
+# OUTCOME (2026-07-16, full suite; /data/lab/frontier-to-pit/results-pit-cardformat):
+# the documented format is WORSE than the Alpaca format we ship on every task that carries
+# any signal — MMLU-Redux 0.2205 -> 0.0012, GPQA 0.1616 -> 0.0000, IFEval 0.2421 -> 0.1257
+# (card sampling; greedy lands the same) — and ties at the floor on MMLU-Pro and HumanEval,
+# which Alpaca already bottoms out on at 0.0000.
+# Under the role markers it emits bare <|assistant|>/<|user|> loops, so the answer
+# extractors find nothing to score. _chat vs _chat_greedy agree within noise, so the format
+# is doing this, not the decoding. Keeping the Alpaca numbers on the site is therefore the
+# charitable choice, not a thumb on the scale. Full reasoning + the KV-cache equivalence
+# check: see the PIT_CHAT_TEMPLATE comment in backends.py and documents/pit_issues.md.
+# These specs are kept so the claim stays reproducible — do not delete them to "clean up".
 _PIT_2015_ARGS = {"pretrained": "Diamegs/PIT-4B-FT-201511", "max_length": 2048}
 MODELS["pit_4b_2015_chat"] = {
     "backend": "pit_chat", "args": dict(_PIT_2015_ARGS),

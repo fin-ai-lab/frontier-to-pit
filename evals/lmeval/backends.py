@@ -49,8 +49,51 @@ def gpu_batch_size(default: int = _DEFAULT_HF_BATCH) -> int:
     return default
 
 
-# PIT-4B-FT's model card shows a <|user|>/<|assistant|> format that degenerates; the
-# official PIT eval prompts it Alpaca-style, which works. (Mirrors evals/models.py.)
+# PIT-4B-FT-201511 prompt format — why we send Alpaca, in full, because it is contested.
+#
+# PIT ships two mutually inconsistent formats, and neither of us picked this fight:
+#   * its SFT tokenizer (post_training/sft_tokens.py) trains on <|user|>/<|assistant|>/<|end|>
+#     role markers, which its HF model card also documents;
+#   * its own IFEval script (eval/ifeval_test.py) evaluates HF candidates with Alpaca
+#     "### Instruction:/### Response:".
+# We took the format PIT's own evaluator uses. A third-party audit (documents/pit_issues.md)
+# argues that was the wrong call. We then went and measured it rather than argue.
+#
+# WHAT WE TRIED, in good faith, to make this checkpoint work:
+#   1. Both templates. The card's role-marker format runs as `pit_4b_2015_chat*` (see the
+#      specs in __main__.py); results in /data/lab/frontier-to-pit/results-pit-cardformat.
+#   2. Both decodings, since the card recommends sampling and our suite runs greedy: the
+#      card format at its own T=0.7/top_p=0.9 AND at greedy, so format and decoding are
+#      separated rather than confounded.
+#   3. <|end|> stopping, as the card specifies (see PITCardHFLM.generate_until).
+#
+# WHAT WE FOUND (PIT-4B-FT-201511, full utility suite, metrics per tools/aggregate_score.py):
+#
+#                                 MMLU-Pro  MMLU-Redux   GPQA-D   IFEval  HumanEval
+#     Alpaca + greedy  (shipped)     0.0000      0.2205   0.1616   0.2421     0.0000
+#     card chat + T=0.7/p=0.9        0.0024      0.0012   0.0000   0.1257     0.0000
+#     card chat + greedy             0.0000      0.0000   0.0000   0.1275     0.0000
+#
+# The Alpaca format we ship is this checkpoint's BEST case. The documented format scores
+# lower on every task that has any signal and collapses MMLU-Redux/GPQA to zero — it emits
+# bare role-marker loops, so nothing is extractable. Card-greedy ~= card-sampling, so this
+# is the format, not the decoding. Our formatter choice therefore flatters PIT; it does not
+# penalise it, and no number on the site depends on which of the two we use.
+#
+# THE FAST RUNNER IS NOT THE CAUSE. _patch_pit_kv_cache below gives PIT a KV cache it does
+# not ship. The same audit checked it against stock full-prefix recomputation on an A10:
+# 64/64 greedy tokens identical on all three site prompts, mean |logit| delta 0.037–0.067
+# against max logit magnitude ~29–33 (bf16 kernel/op-order noise), and not one greedy
+# decision changed. Behaviourally equivalent for greedy; do not extend that claim to
+# sampling, where small logit deltas can eventually diverge even at a fixed seed.
+#
+# PIT-4B-FT-202412 IS FINE — AND IS NOT WHAT WE BENCHMARK. The audit's 2024 control does
+# respond under the role-marker format, so PIT's architecture, HF wrapper and export stack
+# are not broken; the defect is specific to the 2015 checkpoint. But this benchmark is a
+# 2015 point-in-time comparison: a 2024-cutoff model has no look-ahead constraint to hold
+# and cannot stand in for 201511. 201511 is the only PIT checkpoint at our cutoff, so it is
+# the one that gets compared, degenerate or not. That it degenerates under BOTH formats is
+# the audit's own finding, not ours.
 PIT_CHAT_TEMPLATE = (
     "{% for m in messages %}{% if m['role'] == 'user' %}"
     "### Instruction:\n{{ m['content'] }}\n\n### Response:\n"
