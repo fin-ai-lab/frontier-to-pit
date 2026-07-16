@@ -156,7 +156,8 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
     # anything — the visible stream trails generation by ~1s and arrives in blocks.
     ap.add_argument("--no-guard", action="store_true",
                     help="disable the live degeneration guard (guard is on by default with DD)")
-    ap.add_argument("--guard-model", default="Qwen/Qwen3.5-2B", help="judge LM (HF)")
+    ap.add_argument("--guard-model", default="unsloth/gemma-3-4b-it",
+                    help="judge LM (HF; ungated mirror — pulls without auth)")
     ap.add_argument("--guard-device", default=None,
                     help="GPU for the guard judge (default: first free GPU after P's TP ranks "
                          "and the aux models; else under TP the last TP rank's spare memory — "
@@ -227,7 +228,7 @@ async def _run(args, prompt: str | None) -> None:
         aux_q=args.aux_q if use_dd else None,
         dd_kwargs={"aux_device": aux_device} if aux_device else None,
         steer=steer,
-        guard=guard_cfg,
+        guard=guard_cfg if guard_cfg is not None else False,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=max_model_len,

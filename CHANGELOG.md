@@ -70,6 +70,28 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The degeneration guard is ON BY DEFAULT whenever DD is configured, and its
+  judge is now `unsloth/gemma-3-4b-it` (threshold 0.5).**
+  `build_llm`/`build_async_llm` install the guard automatically with DD
+  (`guard=False` opts out; a `GuardConfig` customizes) — a strong DD push is
+  exactly what produces the collapse the guard repairs, and the steady state
+  costs ~0.1–0.2% of step time. The judge swap follows the 2026-07-16
+  judge × threshold sweep (ma+pharma at α=1.5, gemma-27B-judged): the previous
+  `Qwen/Qwen3.5-2B` judge's GDN linear-attention layers run HF-eager as a
+  ~113 ms fixed-cost sequential scan per fired check, so a plain-attention
+  judge is ~3× cheaper (~42 ms vs ~121 ms per gated call) — and gemma-3-4b
+  also *detects better*: pooled destroyed 31.4% (unguarded) → 7.7% vs 8.6%
+  for the old judge, leak unchanged, zero visible failures. Its operating
+  point is threshold-insensitive (offline gated TPR ~86% / FPR ~6–7%, flat
+  from 0.3 to 0.99), so 0.5 stays the default with no tuning cliff. The
+  unsloth mirror is ungated — fresh boxes pull it without a HF login.
+  (gemma-3-1b was evaluated and rejected: no class separation — gated FPR
+  22–46% at every threshold, 2882 rollbacks/325 requests end-to-end;
+  `Qwen3-1.7B` is a viable budget pick at threshold 0.8 if judge latency
+  matters more than the last ~2 pp of repair.
+  `tools/calibrate_guard_threshold.py` re-derives the operating table for any
+  candidate judge from the labeled windows.)
+
 - **The aux engine's sliding window is GONE: the aux models now see P's full
   stream.** `window` was an engine-level truncation — a relic of the 2K-context
   v1 aux models: rows crossing it re-primed on a truncated tail

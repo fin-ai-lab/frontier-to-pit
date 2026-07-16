@@ -78,7 +78,8 @@ benchmarks below are NOTHINK, so `--think` is off the measured config.
 ### The live degeneration guard (on by default with DD)
 
 Under a strong DD push a reply can occasionally collapse into a repeating loop or
-symbol spam. A small judge LM (`Qwen/Qwen3.5-2B`, loaded on the aux GPU) watches every
+symbol spam. A small judge LM (`unsloth/gemma-3-4b-it` — an ungated mirror, so it
+downloads without a HF login — loaded on the aux GPU) watches every
 reply as it generates: every 25 engine steps it reads the newest 50 tokens, and when it
 sees mechanical collapse the reply is **rewound 50 tokens and resampled** — the fusion
 (and therefore the unlearning) stays at full strength, only the collapse is repaired.
@@ -137,11 +138,12 @@ at build time (baked into the CUDA graphs). Drop `steer=` for DD-only, or omit t
 matches the benchmarks — for the `--think` equivalent, drop it *and* render the prompt
 with `apply_chat_template(..., enable_thinking=True)`, since the two must agree.
 
-For the degeneration guard, pass `guard=GuardConfig()` (from `ftp.guard`) to
-`build_llm` — that installs detection in the engine — and generate through
+The degeneration guard's detection half is installed **by default** whenever DD is
+configured (`build_llm`/`build_async_llm`; pass `guard=False` to opt out, or a
+`GuardConfig` from `ftp.guard` to customize). Generate through
 `ftp.guard.rollback_generate(llm, token_prompts, sp, marker_id=resolve_marker_id(tok),
-backtrack=50, decode=tok.decode)`, which handles the rewind-and-resample. `run.py`
-wires both ends for you.
+backtrack=50, decode=tok.decode)` to get the rewind-and-resample half — without it a
+tripped reply simply stops at the collapse point. `run.py` wires both ends for you.
 
 Run it inside the project's environment with `uv run python your_script.py`.
 

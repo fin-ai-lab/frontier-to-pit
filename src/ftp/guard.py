@@ -73,8 +73,17 @@ class GuardConfig:
     """Configuration for the live degeneration guard.
 
     Args:
-        model: HF id / local path of the judge LM (a small instruct model; the
-            default matches the benchmarked family so its tokenizer agrees with P).
+        model: HF id / local path of the judge LM (a small instruct model). The
+            judge reads the window as TEXT (decoded engine-side with P's
+            tokenizer), so it need not share P's family. Default
+            ``unsloth/gemma-3-4b-it`` (2026-07-16 judge x threshold sweep,
+            ma+pharma at alpha=1.5): destroyed 31.4% -> 7.7% pooled vs 8.6% for
+            the previous ``Qwen/Qwen3.5-2B`` judge, leak unchanged, ZERO visible
+            failures — at ~1/3 the fire cost (~42ms vs ~121ms per gated call;
+            the Qwen3.5 judge's GDN linear-attention layers run HF-eager as a
+            ~113ms fixed-cost sequential scan). The unsloth mirror is ungated,
+            so unauthenticated boxes can pull it. gemma-3-1b was rejected: no
+            class separation (gated FPR 22-46% at every threshold).
         device: Device for the judge (e.g. ``"cuda:1"``). ``None`` = the default
             layout (:func:`ftp.config.default_device_layout`): the first free GPU
             after P's tensor-parallel ranks and the DD aux devices; failing that,
@@ -90,12 +99,17 @@ class GuardConfig:
             between sweeps (one token per step).
         backtrack: Tokens shown to the judge per check AND tokens discarded on a
             rewind. The window is the last ``backtrack`` tokens of prompt+output.
-        threshold: Trip when p(degenerated) >= threshold. Calibrated (with
-            ``gate_ratio``) on gemma-labeled degen/clean windows from the real
-            alpha=1.5 results: gate 1.6 + threshold 0.5 measures TPR 0.80 /
-            FPR 0.02 PER CHECK — and because a persistent loop is re-checked
-            every sweep, the effective catch rate compounds toward 1 while a
-            false trip costs only one recoverable rewind.
+        threshold: Trip when p(degenerated) >= threshold. For the gemma-3-4b
+            judge this is nearly a NON-KNOB: its yes/no logits saturate, so the
+            gated operating point is flat from 0.3 to 0.99 (offline on the
+            labeled alpha=1.5 windows: TPR ~86% / FPR ~6-7%; end-to-end 0.5 and
+            0.9 landed within noise — tools/calibrate_guard_threshold.py
+            re-derives this for any candidate judge). 0.5 is kept as the
+            neutral default. A persistent loop is re-checked every sweep, so
+            the effective catch rate compounds toward 1 while a false trip
+            costs only one recoverable rewind. (History: the original
+            Qwen3.5-2B judge measured TPR 0.80 / FPR 0.02 per check at gate
+            1.6 + threshold 0.5.)
         gate_ratio: zlib pre-gate: a window is only shown to the judge when
             ``len(bytes)/len(zlib(bytes)) >= gate_ratio`` (loops compress;
             normal prose sits ~0.6-1.2 at window size). Kills most judge
@@ -126,7 +140,7 @@ class GuardConfig:
             look like text before the judge sees it.
     """
 
-    model: str = "Qwen/Qwen3.5-2B"
+    model: str = "unsloth/gemma-3-4b-it"
     device: str | None = None
     interval: int = 25
     backtrack: int = 50
@@ -250,10 +264,14 @@ def window_suspicious(text: str, gate_ratio: float) -> bool:
 # The judge prompt. Kept deliberately narrow: the offline destruction judge's failure
 # modes (tools/README_degradation.md) showed that "is this text bad?" flags rambling
 # and hallucination — which are EXPECTED under unlearning. Only mechanical collapse
-# counts. Calibrated on gemma-labeled windows (2026-07-16, 100 degen + 100 clean from
-# the alpha=1.5 arm): this few-shot form + threshold 0.5 behind the zlib gate measures
-# TPR 0.80 / FPR 0.02 per check; the zero-shot fenced form scored mushier (nothing
-# tripped above 0.8, 7% FPR at its best threshold).
+# counts. Calibrated on gemma-labeled windows from the alpha=1.5 arm
+# (tools/calibrate_guard_threshold.py): with the default gemma-3-4b judge this
+# few-shot form measures gated TPR ~86% / FPR ~6-7%, flat across thresholds
+# 0.3-0.99 (the judge's yes/no logits saturate). History: on the original
+# Qwen3.5-2B judge it measured TPR 0.80 / FPR 0.02 per check at threshold 0.5;
+# the zero-shot fenced form scored mushier on both (7% FPR at its best point);
+# gemma-3-1b cannot use this prompt at all (clean-window p50 = 0.73 — no
+# separation at any threshold).
 _JUDGE_PROMPT = """\
 Judge whether TEXT (a snippet from the middle of a longer output; it starts and ends \
 mid-sentence, which is normal) has DEGENERATED into mechanical repetition.
@@ -296,11 +314,12 @@ class DegenJudge:
             model = AutoModelForCausalLM.from_pretrained(
                 cfg.model, dtype=dtype, trust_remote_code=True)
         except Exception:  # noqa: BLE001 — fall through to the declared architecture
-            # Multimodal-wrapped checkpoints (e.g. Qwen3.5-*: config nests the LM
-            # under text_config, architectures=[Qwen3_5ForConditionalGeneration])
-            # crash the plain-CausalLM auto route ('...Config' object has no
-            # attribute 'vocab_size'). Load the class the checkpoint DECLARES —
-            # text-only forwards work fine; the vision tower just sits unused.
+            # Multimodal-wrapped checkpoints (gemma-3-4b-it:
+            # Gemma3ForConditionalGeneration; Qwen3.5-*: config nests the LM
+            # under text_config) crash the plain-CausalLM auto route
+            # ('...Config' object has no attribute 'vocab_size'). Load the
+            # class the checkpoint DECLARES — text-only forwards work fine;
+            # the vision tower just sits unused.
             import transformers as _tf
             from transformers import AutoConfig
 
@@ -321,8 +340,9 @@ class DegenJudge:
                     ids.append(enc[0])
             return sorted(set(ids))
 
-        # "yes"/"Yes" and "no"/"No" (no leading-space variants: the Qwen template's
-        # generation prompt ends in a newline, so the answer token starts a line).
+        # "yes"/"Yes" and "no"/"No" (no leading-space variants: both the gemma and
+        # Qwen chat templates end the generation prompt with a newline, so the
+        # answer token starts a line).
         self._yes_ids = first_ids(["yes", "Yes", "YES"])
         self._no_ids = first_ids(["no", "No", "NO"])
         if not self._yes_ids or not self._no_ids:

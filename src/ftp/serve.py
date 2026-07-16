@@ -69,6 +69,25 @@ def _dd_config(model: str, aux_p: str, aux_q: str, **kw) -> DDConfig:
     return DDConfig(aux_p=aux_p, aux_q=aux_q, tokenizer=model, **kw)
 
 
+def _resolve_guard(guard, dd_cfg) -> GuardConfig | None:
+    """Resolve the ``guard`` argument of the builders.
+
+    ``None`` = AUTO (the default): the live degeneration guard is ON whenever
+    DD is configured — a strong DD push is exactly what produces the decoding
+    collapse the guard repairs, and its steady-state cost is ~free (one gated
+    judge sweep per ``interval`` engine steps). ``False`` disables it
+    explicitly (A/B baselines, benches); ``True`` or a :class:`GuardConfig`
+    force it on.
+    """
+    if guard is None:
+        return GuardConfig() if dd_cfg is not None else None
+    if guard is False:
+        return None
+    if guard is True:
+        return GuardConfig()
+    return guard
+
+
 def steer_precapture_kwargs(steer: SteerArgs) -> dict:
     """Engine kwargs (+ env, mutated in place) for the PRE-CAPTURE steering
     route: ``DDSteeringWorker`` installs the hooks before vLLM's memory
@@ -171,7 +190,7 @@ def build_llm(
     dd_kwargs: dict | None = None,
     steer: SteerArgs | None = None,
     steer_precapture: bool = True,
-    guard: GuardConfig | None = None,
+    guard: GuardConfig | bool | None = None,
     tensor_parallel_size: int = 1,
     gpu_memory_utilization: float = 0.90,
     max_model_len: int = 4096,
@@ -189,10 +208,12 @@ def build_llm(
     after build (e.g. clamp sweeps via remove+reinstall) — that route forces
     ``enforce_eager`` and roughly halves throughput.
 
-    ``guard`` installs the live degeneration guard (:mod:`ftp.guard`) in the
-    engine. That is the DETECTION half only — pair generation with
-    :func:`ftp.guard.rollback_generate` (and its marker in ``stop_token_ids``)
-    to get the rewind-and-resample behavior."""
+    ``guard`` controls the live degeneration guard (:mod:`ftp.guard`).
+    Default ``None`` = AUTO: the guard is ON whenever DD is configured (see
+    :func:`_resolve_guard`); pass ``False`` to disable it explicitly, or a
+    :class:`GuardConfig` to customize. The engine side is the DETECTION half
+    only — pair generation with :func:`ftp.guard.rollback_generate` (and its
+    marker in ``stop_token_ids``) to get the rewind-and-resample behavior."""
     from vllm import LLM
 
     from ftp.steering import install_steering
@@ -204,7 +225,7 @@ def build_llm(
         tp=tensor_parallel_size, gpu_mem=gpu_memory_utilization, max_len=max_model_len,
         steer_precapture=steer if (pairs and steer_precapture) else None,
         gdn_prefill_backend=gdn_prefill_backend,
-        guard_cfg=guard,
+        guard_cfg=_resolve_guard(guard, dd_cfg),
     )
     kw["max_num_seqs"] = max_num_seqs
     if pairs and steer_precapture and ({"worker_cls", "enforce_eager"} & llm_kwargs.keys()):
@@ -227,7 +248,7 @@ def build_async_llm(
     dd_kwargs: dict | None = None,
     steer: SteerArgs | None = None,
     steer_precapture: bool = True,
-    guard: GuardConfig | None = None,
+    guard: GuardConfig | bool | None = None,
     tensor_parallel_size: int = 1,
     gpu_memory_utilization: float = 0.90,
     max_model_len: int = 4096,
@@ -264,7 +285,7 @@ def build_async_llm(
         steer_precapture=steer if use_precapture else None,
         gdn_prefill_backend=gdn_prefill_backend,
         force_eager=enforce_eager,
-        guard_cfg=guard,
+        guard_cfg=_resolve_guard(guard, dd_cfg),
     )
     engine = AsyncLLM.from_engine_args(AsyncEngineArgs(**kw))
     return engine, dd_cfg, [] if use_precapture else pairs

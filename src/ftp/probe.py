@@ -196,8 +196,8 @@ def recommend(args) -> None:
         if int(guard_dev.split(":")[1]) < tp:
             guard_msg += (
                 " — riding that P rank's spare memory (it loads post-profiling; keep "
-                "gpu_memory_utilization low enough to leave it ~6 GB: 2B judge "
-                "weights + activations)"
+                "gpu_memory_utilization low enough to leave it ~11 GB: 4B judge "
+                "weights ~8.6 GB + activations)"
             )
         print(
             f"SPLIT ({n_gpu} GPUs): {verdict}. P on {p_where} "
