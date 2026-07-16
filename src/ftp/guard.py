@@ -61,6 +61,7 @@ _ENV_NAMES: dict[str, str] = {
     "max_rounds": "DD_GUARD_MAX_ROUNDS",
     "min_tokens": "DD_GUARD_MIN_TOKENS",
     "gate_ratio": "DD_GUARD_GATE_RATIO",
+    "judge_rows": "DD_GUARD_JUDGE_ROWS",
 }
 
 #: reserved-token candidates for the stop marker, tried in order. Must be a real
@@ -138,6 +139,14 @@ class GuardConfig:
             inside a sweep window is indistinguishable from symbol spam even
             though nothing has gone wrong yet — give the generation room to
             look like text before the judge sees it.
+        judge_rows: Max windows per judge FORWARD — a sweep with more due rows
+            runs several forwards back to back. This bounds the judge's
+            activation transient, which for the gemma-3-4b judge reached ~18 GB
+            on a 64-row call (HF eager) and OOM'd cuda:1 next to the 8B aux
+            pair on 80 GB cards (clean-run jobs 168309/11/12, 2026-07-16);
+            the h200s only survived by having 141 GB. At 16 rows the transient
+            is a few GB, and the common gated case (~a couple rows per fired
+            sweep) is one forward either way. 0 disables the cap.
     """
 
     model: str = "unsloth/gemma-3-4b-it"
@@ -151,6 +160,7 @@ class GuardConfig:
     max_rounds: int = 10
     min_tokens: int = 25
     gate_ratio: float = 1.3
+    judge_rows: int = 16
 
     def __post_init__(self) -> None:
         if self.interval < 1:
@@ -170,6 +180,8 @@ class GuardConfig:
             raise ValueError(f"threshold must be in (0, 1], got {self.threshold}")
         if self.gate_ratio < 0:
             raise ValueError(f"gate_ratio must be >= 0 (0 disables), got {self.gate_ratio}")
+        if self.judge_rows < 0:
+            raise ValueError(f"judge_rows must be >= 0 (0 disables), got {self.judge_rows}")
 
     # ── Environment round-trip (mirrors DDConfig) ────────────────────────────
 
@@ -331,6 +343,7 @@ class DegenJudge:
             model = cls.from_pretrained(cfg.model, dtype=dtype, trust_remote_code=True)
         self._model = model.to(device).eval()
         self._threshold = cfg.threshold
+        self._rows_cap = cfg.judge_rows
 
         def first_ids(variants):
             ids = []
@@ -357,7 +370,18 @@ class DegenJudge:
             return self._tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
 
     def p_degen(self, window_texts: list[str]) -> list[float]:
-        """p(degenerated) per window, from one batched forward."""
+        """p(degenerated) per window; forwards capped at ``judge_rows`` windows.
+
+        The cap bounds the activation transient (gemma-3-4b HF-eager measured
+        ~18 GB on one 64-row forward — enough to OOM an 80 GB card co-hosting
+        the aux pair); the common gated case is a couple of rows = one forward.
+        """
+        cap = self._rows_cap
+        if cap and len(window_texts) > cap:
+            out: list[float] = []
+            for i in range(0, len(window_texts), cap):
+                out += self.p_degen(window_texts[i:i + cap])
+            return out
         torch = self._torch
         prompts = [self._render(t) for t in window_texts]
         enc = self._tok(prompts, return_tensors="pt", padding=True,

@@ -90,7 +90,12 @@ adheres to [Semantic Versioning](https://semver.org/).
   `Qwen3-1.7B` is a viable budget pick at threshold 0.8 if judge latency
   matters more than the last ~2 pp of repair.
   `tools/calibrate_guard_threshold.py` re-derives the operating table for any
-  candidate judge from the labeled windows.)
+  candidate judge from the labeled windows.) Judge forwards are capped at
+  `judge_rows` windows per call (default 16, env `DD_GUARD_JUDGE_ROWS`, 0
+  disables): one uncapped 64-row gemma-3-4b forward transiently allocates
+  ~18 GB (HF eager) and OOM'd an 80 GB card co-hosting the aux pair; the
+  common gated case (a couple of rows per fired sweep) is one forward
+  either way.
 
 - **The aux engine's sliding window is GONE: the aux models now see P's full
   stream.** `window` was an engine-level truncation — a relic of the 2K-context
