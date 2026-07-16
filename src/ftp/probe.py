@@ -11,7 +11,7 @@ Usage::
 
     python -m ftp.probe \\
         --p-model /path/or/hub-id --aux-p ... --aux-q ... \\
-        [--concurrency 32] [--window 1024] [--max-len 2048] [--tp 2] [--live-aux]
+        [--concurrency 32] [--max-len 2048] [--tp 2] [--live-aux]
 
 ``--tp`` models P sharded over that many GPUs (tensor parallel — weights and
 KV divide across the ranks): the split recommendation becomes e.g. the 4xGPU
@@ -122,6 +122,8 @@ def recommend(args) -> None:
     if not caps:
         raise SystemExit("no CUDA devices visible")
 
+    if not args.window:  # 0 = full context: aux capacity matches P's max_model_len
+        args.window = args.max_len
     p_cfg = _load_config(args.p_model)
     p_w = weights_gb(args.p_model)
     p_kv_seq = kv_per_seq_gb(p_cfg, args.max_len)
@@ -266,7 +268,9 @@ def main() -> None:
     ap.add_argument("--aux-p", required=True)
     ap.add_argument("--aux-q", required=True)
     ap.add_argument("--concurrency", type=int, default=32, help="peak concurrent DD requests")
-    ap.add_argument("--window", type=int, default=1024, help="aux context window")
+    ap.add_argument("--window", type=int, default=0,
+                    help="aux context capacity (0 = full context, i.e. --max-len; the aux "
+                         "models see P's whole stream — the engine no longer truncates)")
     ap.add_argument("--max-len", type=int, default=2048, help="P max_model_len")
     ap.add_argument("--tp", type=int, default=1,
                     help="model P sharded over this many GPUs (tensor_parallel_size)")

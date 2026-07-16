@@ -49,7 +49,13 @@ class DDConfig:
         aux_p: Path or HF Hub id of the "forget" aux model (trained WITH the
             knowledge to suppress).
         aux_q: Path or HF Hub id of the "retain" aux model (trained WITHOUT it).
-        window: Aux-model context window in tokens. Aux KV caches slide past it.
+        window: Aux engine context CAPACITY in tokens — a hard bound (page
+            tables, ring sizing), never a truncation: the aux models always see
+            P's full stream, and exceeding the capacity raises. ``0`` (default)
+            = auto: P's ``max_model_len`` (doubled in universal mode, where
+            retokenization can inflate the aux stream). The old engine-level
+            sliding window (aux context truncated past this value — a relic of
+            the 2K-context v1 aux models) was removed 2026-07-16.
         alpha_default: DD strength used when a request's ``SamplingParams``
             omits ``extra_args={"dd_alpha": ...}``. ``0.0`` bypasses DD.
         suppress_tokens: Tokens banned during DD generation, given as token ids
@@ -114,7 +120,7 @@ class DDConfig:
 
     aux_p: str
     aux_q: str
-    window: int = 2048
+    window: int = 0  # 0 = auto: P's max_model_len (2x in universal mode)
     alpha_default: float = 1.375
     suppress_tokens: tuple[int | str, ...] = field(default=())
     tokenizer: str | None = None
@@ -132,8 +138,8 @@ class DDConfig:
     def __post_init__(self) -> None:
         if not self.aux_p or not self.aux_q:
             raise ValueError("DDConfig requires both aux_p and aux_q model paths")
-        if self.window < 2:
-            raise ValueError(f"window must be >= 2, got {self.window}")
+        if self.window != 0 and self.window < 2:
+            raise ValueError(f"window must be 0 (auto) or >= 2, got {self.window}")
         if self.alpha_default < 0:
             raise ValueError(f"alpha_default must be >= 0, got {self.alpha_default}")
         if self.prewarm < 0:

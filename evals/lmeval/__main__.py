@@ -94,11 +94,14 @@ _DD_QWEN_ARGS = {
     "aux_device": "cuda:1", "compile_aux": True,
     "prewarm": int(os.environ.get("DD_PREWARM", "256")),  # lower on 80GB GPUs (aux OOMs cuda:1)
     # max_model_len matches qwen3_5_27b: full prompt + the 16384-tok utility CoT budget
-    # untruncated. The aux stays cheap via its dd_window sliding window (engine.py), so DD
-    # does full-context utility while the 3B aux never pays for the long context.
+    # untruncated. dd_window 0 = auto aux capacity (= max_model_len): the aux models see
+    # P's FULL stream — the old 2048 sliding window (every DD result generated before
+    # 2026-07-16 ran under it: aux truncated to the trailing 2048 tokens, prompts sliding
+    # out of view mid-generation) was a relic of the 2K-context v1 aux and is retired.
+    # The 512-token sliding-attention layers in the aux ARCH bound the KV cost instead.
     "max_model_len": 20480, "gpu_memory_utilization": 0.93,
     "max_num_seqs": int(os.environ.get("DD_MAX_NUM_SEQS", "256")),
-    "dd_window": 2048, "dtype": "bfloat16",
+    "dd_window": 0, "dtype": "bfloat16",
     "compilation_config": {"cudagraph_capture_sizes": [16, 32, 64, 128, 256]},
     "trust_remote_code": True, "enable_thinking": False,
     "limit_mm_per_prompt": {"image": 0, "video": 0},

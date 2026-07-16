@@ -317,6 +317,10 @@ class DDLogitsProcessor(AdapterLogitsProcessor):
                 self._p_tok_path = vllm_config.model_config.tokenizer
             except AttributeError:  # vllm config layout drift
                 self._p_tok_path = None
+        try:  # P's context length: sizes the auto aux capacity (DDConfig.window=0)
+            self._max_model_len: int | None = int(vllm_config.model_config.max_model_len)
+        except (AttributeError, TypeError, ValueError):  # vllm config layout drift
+            self._max_model_len = None
 
         # Under TP, vLLM's memory profiling runs on EVERY card after this
         # constructor; aux allocations resident during profiling reproducibly
@@ -389,6 +393,50 @@ class DDLogitsProcessor(AdapterLogitsProcessor):
                     flush=True,
                 )
                 fuse = "off"
+        # Tokenizer-mode resolution, HOISTED before engine construction: the
+        # auto aux capacity depends on it (universal retokenization can inflate
+        # the aux stream past P's token count). "shared": P and the aux pair
+        # share one tokenizer and ids pass straight through (the pristine fast
+        # path). "universal": P's stream is retokenized for the aux models and
+        # their distributions are mapped onto P's vocab. "auto" compares vocabs.
+        mode = cfg.mode
+        p_tok_path = self._p_tok_path
+        tok_P = aux_tok = None
+        if mode != "shared":
+            if p_tok_path is None:
+                if mode == "universal":
+                    raise ValueError(
+                        "mode='universal' needs P's tokenizer path (vLLM model "
+                        "config or DDConfig.tokenizer)"
+                    )
+                mode = "shared"  # auto, but nothing to compare against
+            else:
+                tok_P = AutoTokenizer.from_pretrained(p_tok_path)
+                aux_tok = AutoTokenizer.from_pretrained(cfg.aux_p, trust_remote_code=True)
+                if mode == "auto":
+                    same = tok_P.get_vocab() == aux_tok.get_vocab()
+                    mode = "shared" if same else "universal"
+        print(f"[DDLogitsProcessor] tokenizer mode: {mode}", flush=True)
+
+        # Aux context CAPACITY: the aux models always see P's full stream (the
+        # engine-level sliding window is gone). Explicit cfg.window is honored;
+        # 0 = auto: P's max_model_len — exact in shared mode (aux stream == P
+        # stream), doubled in universal mode (retokenization inflation).
+        win = cfg.window
+        if not win:
+            if not self._max_model_len:
+                raise ValueError(
+                    "DDConfig.window=0 (auto) needs vLLM's max_model_len, which "
+                    "this vLLM version does not expose — set DDConfig.window to "
+                    "P's context length explicitly")
+            win = self._max_model_len * (2 if mode == "universal" else 1)
+            print(
+                f"[DDLogitsProcessor] aux capacity auto: {win} tokens "
+                f"(P max_model_len {self._max_model_len}"
+                + (", x2 for universal retokenization)" if mode == "universal" else ")"),
+                flush=True,
+            )
+
         self._fused = fuse != "off"
         if self._fused:
             print(
@@ -396,19 +444,19 @@ class DDLogitsProcessor(AdapterLogitsProcessor):
                 flush=True,
             )
             self._aux = AuxBatchedEngine(
-                cfg.aux_p, aux_p_device, dtype, cfg.window, cfg.compile_aux, model2=cfg.aux_q,
+                cfg.aux_p, aux_p_device, dtype, win, cfg.compile_aux, model2=cfg.aux_q,
                 pool_gb=cfg.aux_kv_gb or None,
             )
             self._aux_engines: tuple[AuxBatchedEngine, ...] = (self._aux,)
         else:
             print(f"[DDLogitsProcessor] loading aux_p from {cfg.aux_p}", flush=True)
             self._aux_p = AuxBatchedEngine(
-                cfg.aux_p, aux_p_device, dtype, cfg.window, cfg.compile_aux,
+                cfg.aux_p, aux_p_device, dtype, win, cfg.compile_aux,
                 pool_gb=(cfg.aux_kv_gb / 2) or None,
             )
             print(f"[DDLogitsProcessor] loading aux_q from {cfg.aux_q}", flush=True)
             self._aux_q = AuxBatchedEngine(
-                cfg.aux_q, aux_q_device, dtype, cfg.window, cfg.compile_aux,
+                cfg.aux_q, aux_q_device, dtype, win, cfg.compile_aux,
                 pool_gb=(cfg.aux_kv_gb / 2) or None,
             )
             self._aux_engines = (self._aux_p, self._aux_q)
@@ -459,28 +507,8 @@ class DDLogitsProcessor(AdapterLogitsProcessor):
         self._aux_worker: _AuxWorker | None = None
         print("[DDLogitsProcessor] aux engines ready", flush=True)
 
-        # Tokenizer-mode resolution. "shared": P and the aux pair share one
-        # tokenizer and ids pass straight through (the pristine fast path).
-        # "universal": P's stream is retokenized for the aux models and their
-        # distributions are mapped onto P's vocab. "auto" compares the vocabs.
-        mode = cfg.mode
-        p_tok_path = self._p_tok_path
-        if mode != "shared":
-            if p_tok_path is None:
-                if mode == "universal":
-                    raise ValueError(
-                        "mode='universal' needs P's tokenizer path (vLLM model "
-                        "config or DDConfig.tokenizer)"
-                    )
-                mode = "shared"  # auto, but nothing to compare against
-            else:
-                tok_P = AutoTokenizer.from_pretrained(p_tok_path)
-                aux_tok = AutoTokenizer.from_pretrained(cfg.aux_p, trust_remote_code=True)
-                if mode == "auto":
-                    same = tok_P.get_vocab() == aux_tok.get_vocab()
-                    mode = "shared" if same else "universal"
-        print(f"[DDLogitsProcessor] tokenizer mode: {mode}", flush=True)
-
+        # Bridge construction for universal mode (mode/tok_P/aux_tok resolved
+        # above, before the engines were built).
         if mode == "universal":
             if split:
                 raise ValueError(
@@ -502,7 +530,7 @@ class DDLogitsProcessor(AdapterLogitsProcessor):
                 self._aux_engines[0],
                 self._aux_engines[1] if not self._fused else None,
                 max_feeds_per_step=cfg.max_feeds_per_step,
-                window=cfg.window,
+                window=win,
                 aux_streams=self._aux_streams,
                 adapter=adapter,
             )

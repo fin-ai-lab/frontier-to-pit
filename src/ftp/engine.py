@@ -65,20 +65,23 @@ non-CUDA / no-flashinfer builds always run it.
 
 Window semantics
 ----------------
-``window`` is the aux context BUDGET (<= the model's trained context). Where
-the old engine slid past it with per-step evictions (keys keeping stale rotary
-positions), a row here that would exceed the window is RE-PRIMED: its pages
-are freed and the tail ``window * (1 - DD_REPRIME_MARGIN)`` tokens of its full
-context are re-prefilled with re-based positions. With a 32K-context aux and
-``window`` = 32768 >= max_model_len, this never fires.
+``window`` is the aux context CAPACITY (<= the model's trained context) — a
+hard bound used to size page tables and the sliding rings, NOT a truncation
+mechanism. The aux models see P's full stream; a row that would exceed the
+capacity raises instead of being silently truncated. Size it to P's
+``max_model_len`` (the vLLM processor does this automatically when
+``DDConfig.window`` is 0/auto) and the error is unreachable — P cannot
+generate past its own context. The old engine-level sliding window (rows
+RE-PRIMED to a truncated tail past the window — a relic of the 2K-context v1
+aux models) was REMOVED 2026-07-16; it lives in git history.
 
 Scope: models whose attention routes through the HF attention interface
 (standard Llama-family and derivatives like FlexLlama that reuse the stock
 attention blocks).
 
 Env knobs: ``DD_PAGED_FLASHINFER=0`` forces the fallback attention;
-``DD_REPRIME_MARGIN`` (default 0.25); ``DD_PREFILL_TOKEN_BUDGET`` caps tokens
-per eager prefill forward (default 32768).
+``DD_PREFILL_TOKEN_BUDGET`` caps tokens per eager prefill forward
+(default 32768).
 """
 
 from __future__ import annotations
@@ -303,7 +306,7 @@ class _PagePool:
 
 @dataclass
 class _RowState:
-    seq_len: int = 0  # tokens currently cached (restarts on re-prime)
+    seq_len: int = 0  # tokens currently cached
     primed: bool = False
     pages_full: list[list[int]] = field(default_factory=list)  # per plane
     pages_sw: list[list[int]] = field(default_factory=list)  # per plane (ring)
@@ -465,8 +468,9 @@ class AuxBatchedEngine:
             self._sw_idx, self._full_idx, self._sw = [], list(range(self._n_layers)), 0
         self._sw_set = set(self._sw_idx)
         # Max pages a sliding ring can span: window + one page of hysteresis. The
-        # model's sliding window is clamped by the ENGINE window: rows are re-primed
-        # to <= `window` tokens, so ring pages beyond it can never hold live KV.
+        # model's sliding window is clamped by the ENGINE capacity: rows are
+        # hard-capped at `window` tokens (capacity error past it), so ring pages
+        # beyond it can never hold live KV.
         # (The v4 32K aux ships sliding_window=32768 = "full attention below 32K";
         # sizing rings by it would ask ~3 GiB/row -> OOM at prewarm 64. Attention
         # masks still use self._sw, so semantics are unchanged — with ctx <= window
@@ -480,13 +484,10 @@ class AuxBatchedEngine:
         self._window = window
         # The graphed decode path skips PairedLookupRotary's per-step position
         # bounds check (a host sync, illegal under capture), so bound positions
-        # against the rope cache here instead. Through step() positions are
-        # <= window - 1 (rows at seq_len + 1 > window re-prime first; prefill
-        # feeds <= window tokens), so window == cache_len is exact — the v4
-        # 32K pair runs precisely there — and only window > cache_len is an
-        # impossible config. step_pairs may transiently CROSS the window
-        # (bridge bursts; step() re-primes right after), so it carries its own
-        # per-feed guard against _rope_cache_len below.
+        # against the rope cache here at BUILD time instead. Positions are
+        # always <= window - 1 (step() and step_pairs raise the capacity error
+        # past it; prefill feeds <= window tokens), so window == cache_len is
+        # exact — and only window > cache_len is an impossible config.
         self._rope_cache_len: int | None = None
         for _m in self._model.modules():
             _clen = getattr(_m, "cache_len", None)
@@ -499,8 +500,6 @@ class AuxBatchedEngine:
                     )
                 self._rope_cache_len = (_clen if self._rope_cache_len is None
                                         else min(self._rope_cache_len, _clen))
-        margin = float(os.environ.get("DD_REPRIME_MARGIN", "0.25"))
-        self._reprime_keep = max(1, window - int(window * margin))
         self._prefill_budget = int(os.environ.get("DD_PREFILL_TOKEN_BUDGET", "32768"))
         # DD_PRIME_STATS=1: per-prefill-group host-issue/GPU cost (printed as
         # each group's events complete — event queries only, no syncs).
@@ -594,10 +593,23 @@ class AuxBatchedEngine:
 
     # ── Pool sizing ───────────────────────────────────────────────────────────
 
+    def _mem_capped_pages(self, want: int) -> int:
+        """Cap an automatic upfront full-pool sizing at ~80% of the device's
+        CURRENTLY free memory. With full-context capacities the batch x window
+        worst case is enormous (64 rows x 20K tokens ~ tens of GB) while real
+        usage tracks tokens actually in flight — so allocate up to the cap and
+        let demand growth (alloc doubles, with a warning + decode-graph
+        recapture) cover the rare overflow instead of OOMing upfront."""
+        if want <= 0 or self._device.type != "cuda":
+            return max(64, want)
+        free, _ = torch.cuda.mem_get_info(self._device)
+        per_page = self._pool_full.bytes_per_page() * len(self._full_idx)
+        return max(64, min(want, int(free * 0.8) // per_page))
+
     def _default_full_pages(self) -> int:
         """Lazy full-pool sizing (first allocation without a prewarm call).
-        pool_gb caps it exactly like prewarm does — the batch x window worst
-        case below is only sane for small windows."""
+        pool_gb caps it exactly like prewarm does; the automatic batch x window
+        worst case is memory-capped (see _mem_capped_pages)."""
         if self._pool_gb is not None:
             rows = max(64, len(self._states) or 64) * self._replicas
             sw_bytes = (self._pool_sw.total_bytes()
@@ -608,7 +620,7 @@ class AuxBatchedEngine:
         if self._pool_tokens_hint:
             return math.ceil(self._pool_tokens_hint / _PAGE)
         rows = max(64, len(self._states) or 64) * self._replicas
-        return rows * (math.ceil((self._window + 1) / _PAGE) + 1)
+        return self._mem_capped_pages(rows * (math.ceil((self._window + 1) / _PAGE) + 1))
 
     def _alloc_full(self, n: int) -> list[int]:
         return self._pool_full.alloc(n, self._default_full_pages())
@@ -747,7 +759,9 @@ class AuxBatchedEngine:
 
         Sliding pools are exact-sized (ring x rows). The full pool takes the
         remainder of ``pool_gb`` when given, else the ``batch x window`` worst
-        case (only sane for small windows)."""
+        case capped at ~80% of the device's free memory (full-context
+        capacities make the worst case enormous; demand growth covers the
+        rare overflow — see _mem_capped_pages)."""
         rows = batch_size * self._replicas
         if self._pool_sw is not None:
             need_sw = rows * self._sw_ring_pages
@@ -763,6 +777,7 @@ class AuxBatchedEngine:
             n_full = rows * (math.ceil((self._window + 1) / _PAGE) + 1)
             if self._pool_tokens_hint:
                 n_full = max(n_full, math.ceil(self._pool_tokens_hint / _PAGE))
+            n_full = max(rows, self._mem_capped_pages(n_full))
         if self._pool_full.n_pages < n_full:
             self._pool_full.reset()
             self._pool_full.grow(n_full, warn=False)
@@ -831,8 +846,10 @@ class AuxBatchedEngine:
     ) -> torch.Tensor:
         """One batched inference step: requests = [(req_id, prompt_ids,
         output_ids)], returns last-token logits [N, V] ([2, N, V] fused).
-        Unprimed rows prefill; primed rows decode their newest token; rows
-        that would exceed the window re-prime."""
+        Unprimed rows prefill their FULL context; primed rows decode their
+        newest token. Context is never truncated: a row that would exceed the
+        engine capacity (``window``) raises — unreachable when the capacity is
+        sized to P's max_model_len, since P cannot generate past it."""
         if self._pstat_on and self._pstat:
             self._pstat_flush()
         N = len(requests)
@@ -844,21 +861,22 @@ class AuxBatchedEngine:
         for i, (rid, pids, oids) in enumerate(requests):
             st = self._states[rid]
             if st.primed and st.seq_len + 1 > self._window:
-                self._free_row_pages(st)  # re-prime: re-based tail re-prefill
-                st.seq_len = 0
-                st.primed = False
+                raise RuntimeError(
+                    f"request {rid} would exceed the aux engine capacity "
+                    f"({st.seq_len} cached, window {self._window}). Size the "
+                    f"engine window to P's max_model_len (DDConfig.window=0 "
+                    f"does this automatically).")
             if st.primed:
                 to_decode.append((i, rid, oids[-1]))
             else:
                 ctx = list(pids or []) + list(oids)
-                # A prime is only worth its cost while decode steps fit under
-                # the window afterwards. len(ctx) == window used to prime the
-                # full window and then re-prime on the very NEXT step — the
-                # whole initial prefill bought exactly one token (measured as
-                # a doubled prime bill at input == window). Contexts at or
-                # past the window start straight at the re-prime length.
-                keep = self._window if len(ctx) < self._window else self._reprime_keep
-                to_prefill.append((i, rid, ctx[-keep:]))
+                if len(ctx) > self._window:
+                    raise ValueError(
+                        f"request {rid} context ({len(ctx)} tokens) exceeds the "
+                        f"aux engine capacity (window {self._window}). Size the "
+                        f"engine window to P's max_model_len (DDConfig.window=0 "
+                        f"does this automatically).")
+                to_prefill.append((i, rid, ctx))
 
         if to_prefill:
             # Mixed lengths share one padded forward (real traffic never
@@ -896,19 +914,16 @@ class AuxBatchedEngine:
                 raise ValueError(f"step_pairs on unprimed request {rid}")
             if not 1 <= len(toks) <= 2:
                 raise ValueError(f"step_pairs takes 1-2 tokens per request, got {len(toks)}")
-            # Pairs feeds may transiently cross the WINDOW (step() re-primes
-            # the row on its next regular step), but never the ROPE CACHE: the
-            # graphed decode skips the per-step bounds check, so an
-            # out-of-range position would silently gather garbage rotary rows.
-            # Only reachable at window == cache_len (bridge windows normally
-            # sit far below the trained context).
-            if (self._rope_cache_len is not None
-                    and st.seq_len + len(toks) > self._rope_cache_len):
-                raise ValueError(
-                    f"step_pairs feed of {len(toks)} tokens would index past the "
-                    f"paired rope cache ({st.seq_len} cached, cache_len "
-                    f"{self._rope_cache_len}) for request {rid}"
-                )
+            # Pairs feeds must stay inside the engine capacity: page tables are
+            # sized to it, and the build-time ``window <= rope cache_len`` check
+            # makes capacity-bounded positions rope-safe too (the graphed decode
+            # skips the per-step rotary bounds check, so an out-of-range
+            # position would silently gather garbage rotary rows).
+            if st.seq_len + len(toks) > self._window:
+                raise RuntimeError(
+                    f"step_pairs feed of {len(toks)} tokens would exceed the aux "
+                    f"engine capacity ({st.seq_len} cached, window {self._window}) "
+                    f"for request {rid}")
         self._batch_decode([(i, rid, toks[0]) for i, (rid, toks) in enumerate(requests)],
                            logits_out)
         second = [(i, rid, toks[1]) for i, (rid, toks) in enumerate(requests) if len(toks) == 2]
@@ -975,7 +990,7 @@ class AuxBatchedEngine:
         # Async H2D (pinned + non_blocking) like the decode path: a blocking
         # torch.tensor(..., device=dev) stream-syncs the aux device, and inside
         # vLLM's single-threaded loop (current device = P's) that host stall
-        # serializes into the loop on every prefill/re-prime.
+        # serializes into the loop on every prefill.
         pin = dev.type == "cuda"
 
         def _to_dev(t):

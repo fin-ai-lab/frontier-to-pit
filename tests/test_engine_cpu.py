@@ -1,7 +1,7 @@
 """CPU ground-truth tests for AuxBatchedEngine using a tiny random Llama.
 
 These run the REAL engine code paths (batched prefill, uniform decode,
-grouped staggered decode, per-request fallback, window re-prime, page/slot
+grouped staggered decode, per-request fallback, capacity enforcement, page/slot
 recycling) against an unambiguous reference — re-running the model on the full
 context from scratch at every step — in deterministic fp32 on CPU. This is the
 CI net for the cache-management bug class (cursor desync, prefill copy
@@ -66,7 +66,7 @@ def engine(make_engine):
 
 def ref_logits(model, seq: list[int]) -> torch.Tensor:
     with torch.no_grad():
-        return model(input_ids=torch.tensor([seq[-WINDOW:]])).logits[0, -1]
+        return model(input_ids=torch.tensor([seq])).logits[0, -1]
 
 
 def rand_tokens(g: torch.Generator, n: int) -> list[int]:
@@ -83,9 +83,8 @@ def assert_matches_reference(model, outs: dict, seqs: dict) -> None:
 def test_lockstep_ground_truth(tiny_llama, engine):
     """Uniform batch through prefill + decode, exact vs full-context reference.
 
-    Stays within the window: past it the engine re-primes (an intentional
-    context truncation, covered by test_window_shift_deterministic and
-    test_engine_paged_cpu.py's re-prime ground truth)."""
+    Stays within the engine capacity: past it the engine raises (context is
+    never truncated — see test_capacity_exceeded_raises)."""
     g = torch.Generator().manual_seed(1)
     n, t0 = 4, 12
     steps = WINDOW - t0 - 1  # last step decodes at T = WINDOW - 1: no shift yet
@@ -108,32 +107,28 @@ def test_lockstep_ground_truth(tiny_llama, engine):
     assert_matches_reference(tiny_llama, outs, seqs)
 
 
-def test_window_shift_deterministic(tiny_llama, make_engine):
-    """Crossing the window must be deterministic and produce sane outputs.
-
-    Two independent engines fed identical tokens must agree BITWISE through
-    ~20 shift steps — the original in-place overlapping-copy shift was
-    nondeterministic on CUDA and this is the regression net for that class."""
+def test_capacity_exceeded_raises(tiny_llama, make_engine):
+    """The engine never truncates: a row that would exceed the capacity
+    (``window``) raises instead of silently re-priming a truncated tail (the
+    old sliding-window mechanic, removed 2026-07-16). Decode up to the cap is
+    exact ground truth the whole way."""
     g = torch.Generator().manual_seed(6)
-    n, t0, steps = 4, 12, 40  # crosses WINDOW=32 at step 20
-    prompts = [rand_tokens(g, t0) for _ in range(n)]
-    conts = [rand_tokens(g, steps) for _ in range(n)]
+    t0 = 12
+    prompt = rand_tokens(g, t0)
+    cont = rand_tokens(g, WINDOW - t0 + 1)  # one token past the cap
 
-    def run():
-        eng = make_engine()
-        for i in range(n):
-            eng.register(i)
-        outs = [eng.step([(i, prompts[i], []) for i in range(n)])]
-        for s in range(steps):
-            outs.append(eng.step([(i, prompts[i], conts[i][: s + 1]) for i in range(n)]))
-        return outs
-
-    a, b = run(), run()
-    for sa, sb in zip(a, b, strict=True):
-        assert torch.equal(sa, sb)
-        assert torch.isfinite(sa).all()
-        # still a sane distribution after shifts
-        assert sa.float().log_softmax(-1).exp().sum(-1).allclose(torch.ones(n), atol=1e-4)
+    eng = make_engine()
+    eng.register(0)
+    eng.step([(0, prompt, [])])
+    for s in range(WINDOW - t0):  # last step decodes at seq_len == WINDOW
+        out = eng.step([(0, prompt, cont[: s + 1])])
+    torch.testing.assert_close(
+        out[0].float(),
+        ref_logits(tiny_llama, prompt + cont[: WINDOW - t0]),
+        rtol=1e-4, atol=1e-4,
+    )
+    with pytest.raises(RuntimeError, match="capacity"):
+        eng.step([(0, prompt, cont)])
 
 
 def test_staggered_ground_truth(tiny_llama, engine):
@@ -231,48 +226,20 @@ def test_compile_flag_accepted_on_cpu(tiny_llama):
     assert torch.isfinite(out).all()
 
 
-def test_prompt_longer_than_window(tiny_llama, engine):
-    """Prompts beyond the window prime on the KEEP-token tail (window minus the
-    re-prime margin — headroom against an instant re-prime on the next step)."""
+def test_prompt_longer_than_capacity_raises(tiny_llama, engine):
+    """Prompts beyond the capacity raise — the engine never trims a prompt to
+    a tail (the old KEEP-tail prime is gone with the sliding-window mechanic).
+    A prompt of exactly the capacity primes in full and is exact."""
     g = torch.Generator().manual_seed(5)
-    keep = WINDOW - WINDOW // 4  # engine default DD_REPRIME_MARGIN=0.25
-    long_prompt = rand_tokens(g, WINDOW + 10)
     engine.register(7)
-    out = engine.step([(7, long_prompt, [])])
+    with pytest.raises(ValueError, match="capacity"):
+        engine.step([(7, rand_tokens(g, WINDOW + 10), [])])
+    full_prompt = rand_tokens(g, WINDOW)
+    engine.register(8)
+    out = engine.step([(8, full_prompt, [])])
     torch.testing.assert_close(
-        out[0].float(), ref_logits(tiny_llama, long_prompt[-keep:]), rtol=1e-4, atol=1e-4
+        out[-1].float(), ref_logits(tiny_llama, full_prompt), rtol=1e-4, atol=1e-4
     )
-
-
-def test_staggered_window_crossing_deterministic(tiny_llama, make_engine):
-    """A staggered batch (grouped decode path) crossing the sliding window must
-    stay on the grouped path, be bitwise deterministic, and produce sane
-    distributions. (Regression: this regime previously fell back to per-request
-    decoding — 10x slower — because the grouped path refused window shifts.)"""
-    g = torch.Generator().manual_seed(7)
-    n, t0, steps = 4, 10, 50  # leader crosses WINDOW=32 around step 22
-    prompt = rand_tokens(g, t0)
-    conts = [rand_tokens(g, steps + 1) for _ in range(n)]
-
-    def run():
-        eng = make_engine()
-        eng.register(0)
-        outs = [eng.step([(0, prompt, [])])]
-        for i in range(1, n):
-            eng.register(i)
-        reqs = [(0, prompt, conts[0][:1])] + [(i, prompt, []) for i in range(1, n)]
-        outs.append(eng.step(reqs))
-        for s in range(2, steps):
-            reqs = [(0, prompt, conts[0][:s])] + [
-                (i, prompt, conts[i][: s - 1]) for i in range(1, n)
-            ]
-            outs.append(eng.step(reqs))
-        return outs
-
-    a, b = run(), run()
-    for sa, sb in zip(a, b, strict=True):
-        assert torch.equal(sa, sb)
-        assert torch.isfinite(sa).all()
 
 
 def test_rewind_ground_truth(tiny_llama, engine):
@@ -298,33 +265,29 @@ def test_rewind_ground_truth(tiny_llama, engine):
         )
 
 
-def test_rewind_at_cap_deterministic(tiny_llama, make_engine):
-    """rewind(k) at the window cap truncates to window-k valid tokens; the
-    continuation must be bitwise deterministic and produce sane distributions
-    (same harness as test_window_shift_deterministic)."""
+def test_rewind_at_cap_ground_truth(tiny_llama, engine):
+    """rewind(k) on a row AT the capacity, then an alternate continuation back
+    up to the cap, stays exact (no truncated tail anywhere: the cache holds the
+    row's full context)."""
     g = torch.Generator().manual_seed(10)
-    t0, steps = 12, 30  # crosses WINDOW=32 at step 20
+    t0 = 12
     prompt = rand_tokens(g, t0)
-    cont = rand_tokens(g, steps)
-    alt = rand_tokens(g, 6)
+    cont = rand_tokens(g, WINDOW - t0)  # fills the row exactly to the cap
+    alt = rand_tokens(g, 2)
 
-    def run():
-        eng = make_engine()
-        eng.register(0)
-        outs = [eng.step([(0, prompt, [])])]
-        for s in range(steps):
-            outs.append(eng.step([(0, prompt, cont[: s + 1])]))
-        eng.rewind(0, 2)  # at cap: seq_len 42 -> window - 2 = 30
-        base = cont[: steps - 2]
-        for s in range(6):
-            outs.append(eng.step([(0, prompt, base + alt[: s + 1])]))
-        return outs
-
-    a, b = run(), run()
-    for sa, sb in zip(a, b, strict=True):
-        assert torch.equal(sa, sb)
-        assert torch.isfinite(sa).all()
-        assert sa.float().log_softmax(-1).exp().sum(-1).allclose(torch.ones(1), atol=1e-4)
+    engine.register(0)
+    engine.step([(0, prompt, [])])
+    for s in range(WINDOW - t0):
+        engine.step([(0, prompt, cont[: s + 1])])
+    engine.rewind(0, 2)  # seq_len WINDOW -> WINDOW - 2
+    base = cont[: WINDOW - t0 - 2]
+    for s in range(2):
+        out = engine.step([(0, prompt, base + alt[: s + 1])])
+        torch.testing.assert_close(
+            out[0].float(),
+            ref_logits(tiny_llama, prompt + base + alt[: s + 1]),
+            rtol=1e-4, atol=1e-4,
+        )
 
 
 def test_subset_composition_change(tiny_llama, engine):
@@ -430,34 +393,17 @@ def test_step_pairs_after_rewind(tiny_llama, engine):
     )
 
 
-def test_step_pairs_window_cap_deterministic(tiny_llama, make_engine):
-    """Pairs feeds crossing the window cap (per-row evictions of 1 AND 2
-    columns) must be bitwise deterministic with sane distributions."""
+def test_step_pairs_past_capacity_raises(tiny_llama, engine):
+    """A pairs feed that would cross the capacity raises (page tables are
+    sized to the capacity; nothing re-primes it away anymore)."""
     g = torch.Generator().manual_seed(16)
-    prompts = [rand_tokens(g, 10), rand_tokens(g, 11)]
-    conts = [rand_tokens(g, 80) for _ in range(2)]
-
-    def run():
-        eng = make_engine()
-        for i in range(2):
-            eng.register(i)
-        eng.step([(i, prompts[i], []) for i in range(2)])
-        outs = []
-        fed = [0, 0]
-        for step in range(30):  # crosses WINDOW=32 around step 12
-            reqs = []
-            for i in range(2):
-                k = 2 if (step + i) % 3 else 1  # rows hit the cap with k=1 and k=2
-                reqs.append((i, conts[i][fed[i] : fed[i] + k]))
-                fed[i] += k
-            outs.append(eng.step_pairs(reqs))
-        return outs
-
-    a, b = run(), run()
-    for sa, sb in zip(a, b, strict=True):
-        assert torch.equal(sa, sb)
-        assert torch.isfinite(sa).all()
-        assert sa.float().log_softmax(-1).exp().sum(-1).allclose(torch.ones(2), atol=1e-4)
+    prompt = rand_tokens(g, WINDOW - 1)
+    engine.register(0)
+    engine.step([(0, prompt, [])])
+    with pytest.raises(RuntimeError, match="capacity"):
+        engine.step_pairs([(0, rand_tokens(g, 2))])  # WINDOW - 1 + 2 > WINDOW
+    out = engine.step_pairs([(0, rand_tokens(g, 1))])  # exactly at the cap: fine
+    assert torch.isfinite(out).all()
 
 
 def test_step_pairs_validation(tiny_llama, engine):
@@ -483,7 +429,7 @@ def test_rewind_validation(tiny_llama, engine):
     engine.rewind(3, 6)  # rewinding the entire cached context is allowed
 
 
-def test_reprime_with_outputs(tiny_llama, engine):
+def test_register_mid_generation(tiny_llama, engine):
     """A request registered mid-generation (vLLM recompute gap) prefills from
     prompt + outputs and continues exactly on ground truth."""
     g = torch.Generator().manual_seed(8)

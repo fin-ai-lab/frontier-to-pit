@@ -64,8 +64,8 @@ def test_planes_disagree(fused_engine, tiny_llama, tiny_llama_q):
 def test_rich_script_both_planes(fused_engine, tiny_llama, tiny_llama_q):
     """One serving-shaped script through every code path — staggered prefills,
     lockstep decode, mid-run cache GROWTH (the per-plane grow-copy net),
-    rewind, step_pairs bursts, slot recycling, and a window crossing at the
-    end — with both planes on ground truth at every checkpoint below the cap."""
+    rewind, step_pairs bursts, and slot recycling — with both planes on
+    ground truth at every checkpoint."""
     models = (tiny_llama, tiny_llama_q)
     g = torch.Generator().manual_seed(2)
     prompts = [rand_tokens(g, 6 + i) for i in range(4)]
@@ -117,28 +117,28 @@ def test_rich_script_both_planes(fused_engine, tiny_llama, tiny_llama_q):
     assert_both_planes(models, out, 0, p99)
 
 
-def test_window_crossing_deterministic_both_planes(tiny_llama, tiny_llama_q):
-    """Hysteresis eviction must shift BOTH planes: bitwise-deterministic runs
-    and sane per-plane distributions through ~20 at-cap steps."""
+def test_capacity_error_hits_both_planes(tiny_llama, tiny_llama_q):
+    """A fused pair enforces the capacity exactly like a single engine: decode
+    to the cap is finite and sane on BOTH planes, one step past it raises (the
+    engine never truncates)."""
     g = torch.Generator().manual_seed(3)
-    n, t0, steps = 2, 12, 40
+    n, t0 = 2, 12
+    steps = WINDOW - t0
     prompts = [rand_tokens(g, t0) for _ in range(n)]
-    conts = [rand_tokens(g, steps) for _ in range(n)]
+    conts = [rand_tokens(g, steps + 1) for _ in range(n)]
 
-    def run():
-        eng = AuxBatchedEngine(
-            deepcopy(tiny_llama), DEV, torch.float32, WINDOW, model2=deepcopy(tiny_llama_q)
-        )
-        for i in range(n):
-            eng.register(i)
-        outs = [eng.step([(i, prompts[i], []) for i in range(n)])]
-        for s in range(steps):
-            outs.append(eng.step([(i, prompts[i], conts[i][: s + 1]) for i in range(n)]))
-        return outs
+    eng = AuxBatchedEngine(
+        deepcopy(tiny_llama), DEV, torch.float32, WINDOW, model2=deepcopy(tiny_llama_q)
+    )
+    for i in range(n):
+        eng.register(i)
+    out = eng.step([(i, prompts[i], []) for i in range(n)])
+    for s in range(steps):
+        out = eng.step([(i, prompts[i], conts[i][: s + 1]) for i in range(n)])
+    assert torch.isfinite(out).all()
+    probs = out.float().log_softmax(-1).exp().sum(-1)
+    assert probs.allclose(torch.ones(2, n), atol=1e-4)
+    import pytest
 
-    a, b = run(), run()
-    for sa, sb in zip(a, b, strict=True):
-        assert torch.equal(sa, sb)
-        assert torch.isfinite(sa).all()
-        probs = sa.float().log_softmax(-1).exp().sum(-1)
-        assert probs.allclose(torch.ones(2, n), atol=1e-4)
+    with pytest.raises(RuntimeError, match="capacity"):
+        eng.step([(i, prompts[i], conts[i][: steps + 1]) for i in range(n)])

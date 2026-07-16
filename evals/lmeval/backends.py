@@ -723,7 +723,7 @@ class DDVLLM(VLLM):
     """
 
     def __init__(
-        self, pretrained, aux_p=None, aux_q=None, dd_alpha=1.5, dd_window=2048, dd_mode="auto",
+        self, pretrained, aux_p=None, aux_q=None, dd_alpha=1.5, dd_window=0, dd_mode="auto",
         aux_device=None, compile_aux=False, prewarm=0, fuse_pin=True, steer=None,
         steer_sweep=False, dd_retemplate=None, dd_guard=False, dd_guard_kwargs=None, **kwargs,
     ):

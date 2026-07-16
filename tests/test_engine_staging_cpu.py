@@ -49,10 +49,10 @@ def drive(eng, reqs, outs, steps, g):
 
 def test_tables_stay_in_sync_through_lifecycle(tiny_flexllama_factory):
     """Hybrid fused pair: prefill short/long, decode through ring evictions
-    and page appends, rewind, re-prime, unregister/register — the table
-    mirrors must equal the python page lists after every step."""
+    and page appends, rewind, unregister/register — the table mirrors must
+    equal the python page lists after every step."""
     eng = AuxBatchedEngine(
-        tiny_flexllama_factory(0), DEV, torch.float32, 64,
+        tiny_flexllama_factory(0), DEV, torch.float32, 256,
         model2=tiny_flexllama_factory(1),
     )
     g = torch.Generator().manual_seed(0)
@@ -67,7 +67,7 @@ def test_tables_stay_in_sync_through_lifecycle(tiny_flexllama_factory):
 
     eng.rewind(1, 2)  # logical drop; lists/tables unchanged but consistent
     eng._validate_tables()
-    drive(eng, reqs, outs, 30, g)  # long row crosses window 64 -> re-prime
+    drive(eng, reqs, outs, 30, g)  # more decode: rings keep evicting
 
     eng.unregister(2)
     eng.register(9)
@@ -167,10 +167,10 @@ def test_bucket_padding_is_plane_major(tiny_flexllama_factory):
 
 
 def test_window_rope_bound_and_pairs_guard(tiny_flexllama_factory):
-    """window == rope cache_len must BUILD (the v4 32K pair runs exactly
-    there: step() keeps positions <= window-1), window > cache_len must not.
-    step_pairs may cross the WINDOW (step() re-primes after) but never the
-    ROPE CACHE — the graphed decode skips the per-step bounds check."""
+    """window == rope cache_len must BUILD (positions stay <= window-1: the
+    capacity error fires past it, in step() and step_pairs alike), window >
+    cache_len must not — the graphed decode skips the per-step rotary bounds
+    check, so the build-time bound is the only guard."""
     import pytest
 
     # fixture rope caches hold 256 positions
@@ -187,11 +187,8 @@ def test_window_rope_bound_and_pairs_guard(tiny_flexllama_factory):
     g = torch.Generator().manual_seed(3)
     eng.register(1)
     eng.step([(1, rand_tokens(g, 255), [])])  # primed at seq_len 255
-    with pytest.raises(ValueError, match="rope cache"):
-        eng.step_pairs([(1, [5, 6])])  # positions 255, 256 — 256 is OOB
+    with pytest.raises(RuntimeError, match="capacity"):
+        eng.step_pairs([(1, [5, 6])])  # 255 + 2 > 256: over capacity
     eng.step_pairs([(1, [5])])  # position 255 == cache_len - 1: exact
-    with pytest.raises(ValueError, match="rope cache"):
-        eng.step_pairs([(1, [7])])  # position 256 would be OOB
-    # a regular step() re-primes the row instead (window crossed)
-    out = eng.step([(1, rand_tokens(g, 200), [5, 7])])
-    assert torch.isfinite(out).all()
+    with pytest.raises(RuntimeError, match="capacity"):
+        eng.step_pairs([(1, [7])])  # 256 + 1 > 256: over capacity

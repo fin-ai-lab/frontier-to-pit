@@ -70,6 +70,29 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The aux engine's sliding window is GONE: the aux models now see P's full
+  stream.** `window` was an engine-level truncation — a relic of the 2K-context
+  v1 aux models: rows crossing it re-primed on a truncated tail
+  (`window × (1 − DD_REPRIME_MARGIN)` tokens, re-based positions), and prompts
+  longer than it primed on the tail only. EVERY DD result generated before
+  2026-07-16 ran with `dd_window=2048` (verified across the registry and git
+  history: think and nothink alike) — so the aux pair scored divergence from at
+  most the trailing 2048 tokens, mmlu_pro's ~2.5K prompts were never fully seen
+  by the aux, and think-mode CoTs lost the prompt from aux view entirely —
+  while P and every baseline saw full context. Now `window` is a hard CAPACITY
+  (page tables, ring sizing): exceeding it raises loudly instead of truncating
+  silently, and `DDConfig.window=0` (the new default) auto-sizes it to P's
+  `max_model_len` (×2 in universal mode for retokenization inflation), where
+  the error is unreachable. The upfront `batch × window` pool sizing is now
+  capped at ~80% of free device memory (the full-context worst case is huge
+  while live usage tracks tokens in flight; demand growth + graph recapture
+  covers overflow). The 512-token sliding-attention layers in the aux
+  ARCHITECTURE (23 of 28 layers) are model semantics and are unchanged — they
+  are what keeps full-context KV cheap (~5 full-attention layers pay context).
+  `DD_REPRIME_MARGIN` is gone; `AuxBatchedEngine.step`/`step_pairs` raise past
+  capacity. NOTE: alpha/clamp calibrations predate this change — DD numbers
+  produced after it are not directly comparable to the 2048-window results.
+
 - **Temporal eval datasets are now the final shipped artifacts** — the parquets
   under `evals/lmeval/tasks/temporal/` are served verbatim; `utils.py` no longer
   rewrites prompts or drops rows at load time, so running the parquets outside

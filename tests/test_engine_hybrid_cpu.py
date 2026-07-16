@@ -18,7 +18,7 @@ import torch
 from ftp import AuxBatchedEngine
 
 DEV = torch.device("cpu")
-WINDOW = 128  # engine context budget: large enough that re-prime never fires here
+WINDOW = 128  # engine capacity (a bound, never a truncation)
 SW = 16  # fixture sliding_window
 V = 512
 
