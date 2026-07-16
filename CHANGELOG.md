@@ -71,26 +71,29 @@ adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - **The degeneration guard is ON BY DEFAULT whenever DD is configured, and its
-  judge is now `unsloth/gemma-3-4b-it` (threshold 0.5).**
+  judge default is now `Qwen/Qwen3-1.7B` (threshold 0.8).**
   `build_llm`/`build_async_llm` install the guard automatically with DD
   (`guard=False` opts out; a `GuardConfig` customizes) — a strong DD push is
   exactly what produces the collapse the guard repairs, and the steady state
-  costs ~0.1–0.2% of step time. The judge swap follows the 2026-07-16
-  judge × threshold sweep (ma+pharma at α=1.5, gemma-27B-judged): the previous
-  `Qwen/Qwen3.5-2B` judge's GDN linear-attention layers run HF-eager as a
-  ~113 ms fixed-cost sequential scan per fired check, so a plain-attention
-  judge is ~3× cheaper (~42 ms vs ~121 ms per gated call) — and gemma-3-4b
-  also *detects better*: pooled destroyed 31.4% (unguarded) → 7.7% vs 8.6%
-  for the old judge, leak unchanged, zero visible failures. Its operating
-  point is threshold-insensitive (offline gated TPR ~86% / FPR ~6–7%, flat
-  from 0.3 to 0.99), so 0.5 stays the default with no tuning cliff. The
-  unsloth mirror is ungated — fresh boxes pull it without a HF login.
-  (gemma-3-1b was evaluated and rejected: no class separation — gated FPR
-  22–46% at every threshold, 2882 rollbacks/325 requests end-to-end;
-  `Qwen3-1.7B` is a viable budget pick at threshold 0.8 if judge latency
-  matters more than the last ~2 pp of repair.
-  `tools/calibrate_guard_threshold.py` re-derives the operating table for any
-  candidate judge from the labeled windows.) Judge forwards are capped at
+  costs ~0.1–0.2% of step time. The judge choice follows the 2026-07-16
+  judge × threshold sweep (ma+pharma at α=1.5, gemma-27B-judged). The default
+  is sized for the DOCUMENTED QUICKSTART — 2×80 GB with the judge co-hosted
+  next to the 8B aux pair: `Qwen/Qwen3-1.7B` is ~3.4 GB, plain-attention,
+  ungated, ~27 ms per gated call, and repairs pooled destroyed 31.4%
+  (unguarded) → 10.8%. **With >80 GB of judge-GPU headroom (H200, or a spare
+  third card) prefer `unsloth/gemma-3-4b-it` at threshold 0.5** — the sweep
+  winner (destroyed → 7.7%, zero visible failures, ~42 ms/call), but its
+  ~8.6 GB weights don't co-fit on an 80 GB card under load (measured: cuda:1
+  OOM at 78.7/79.2 GB). The benchmark eval arms pin the gemma-3-4b judge
+  explicitly (they run on H200s), so they are unaffected by default changes.
+  Also measured: the previous `Qwen/Qwen3.5-2B` judge repairs to 8.6% but its
+  GDN linear-attention layers run HF-eager as a ~113 ms fixed-cost sequential
+  scan per fired check (~3–4× the plain-attention judges); gemma-3-1b was
+  rejected outright — no class separation (gated FPR 22–46% at every
+  threshold, 2882 rollbacks/325 requests end-to-end). Both finalists are
+  threshold-flat (saturated yes/no logits), so the 0.8 default has no tuning
+  cliff. `tools/calibrate_guard_threshold.py` re-derives the operating table
+  for any candidate judge from the labeled windows. Judge forwards are capped at
   `judge_rows` windows per call (default 16, env `DD_GUARD_JUDGE_ROWS`, 0
   disables): one uncapped 64-row gemma-3-4b forward transiently allocates
   ~18 GB (HF eager) and OOM'd an 80 GB card co-hosting the aux pair; the

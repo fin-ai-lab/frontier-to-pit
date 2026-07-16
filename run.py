@@ -156,8 +156,11 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
     # anything — the visible stream trails generation by ~1s and arrives in blocks.
     ap.add_argument("--no-guard", action="store_true",
                     help="disable the live degeneration guard (guard is on by default with DD)")
-    ap.add_argument("--guard-model", default="unsloth/gemma-3-4b-it",
-                    help="judge LM (HF; ungated mirror — pulls without auth)")
+    ap.add_argument("--guard-model", default=GuardConfig.model,
+                    help=f"judge LM (HF; default {GuardConfig.model} fits the 2x80GB "
+                         "quickstart next to the aux pair; with >80GB judge-GPU headroom "
+                         "— h200, or a spare 3rd GPU — prefer unsloth/gemma-3-4b-it with "
+                         "--guard-threshold 0.5: best measured collapse repair)")
     ap.add_argument("--guard-device", default=None,
                     help="GPU for the guard judge (default: first free GPU after P's TP ranks "
                          "and the aux models; else under TP the last TP rank's spare memory — "
@@ -168,8 +171,9 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
                     help="judge every N engine steps (one batched check)")
     ap.add_argument("--guard-backtrack", type=int, default=50,
                     help="tokens judged per check AND discarded per rewind")
-    ap.add_argument("--guard-threshold", type=float, default=0.5,
-                    help="trip when p(degenerated) >= this")
+    ap.add_argument("--guard-threshold", type=float, default=GuardConfig.threshold,
+                    help="trip when p(degenerated) >= this (judges are near threshold-flat; "
+                         "pair 0.5 with the gemma-3-4b judge)")
     ap.add_argument("--guard-tries", type=int, default=2,
                     help="stuck-point resamples before the walk-back deepens by "
                          "another --guard-backtrack (50 -> 100 -> 150 ...)")

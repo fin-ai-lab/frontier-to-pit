@@ -491,6 +491,12 @@ MODELS["ftp_v6guard_a1.5_L48c10_L27c0"] = {
     "args": {**_DD_QWEN_ARGS, "aux_p": _v6_pairs["partialsft"][0],
              "aux_q": _v6_pairs["partialsft"][1], "fuse_pin": True,
              "dd_guard": True,
+             # PINNED to the sweep-winner judge (2026-07-16): the package
+             # default is the smaller fits-on-2x80GB Qwen3-1.7B, but the
+             # benchmark arms run on h200s/3-GPU where gemma-4b fits — pinning
+             # keeps the arms reproducible across default changes.
+             "dd_guard_kwargs": {"model": "unsloth/gemma-3-4b-it",
+                                 "threshold": 0.5},
              "steer": SteerArgs(triples=[(48, 28961, 10.0)], family="topk",
                                 sae_dir=_SAE_DIR)},
     "gen_kwargs": {**QWEN_GEN, **QWEN_SAMPLING, "max_gen_toks": 4096},
@@ -505,6 +511,9 @@ MODELS["ftp_v6guard_think_L48c10_L27c0"] = {
     "args": {**_DD_QWEN_ARGS, "aux_p": _v6_pairs["partialsft"][0],
              "aux_q": _v6_pairs["partialsft"][1], "fuse_pin": True,
              "dd_guard": True,
+             # PINNED judge — see the nothink twin above.
+             "dd_guard_kwargs": {"model": "unsloth/gemma-3-4b-it",
+                                 "threshold": 0.5},
              "enable_thinking": True, "think_end_token": "</think>",
              "steer": SteerArgs(triples=[(48, 28961, 10.0)], family="topk",
                                 sae_dir=_SAE_DIR)},

@@ -77,14 +77,20 @@ class GuardConfig:
         model: HF id / local path of the judge LM (a small instruct model). The
             judge reads the window as TEXT (decoded engine-side with P's
             tokenizer), so it need not share P's family. Default
-            ``unsloth/gemma-3-4b-it`` (2026-07-16 judge x threshold sweep,
-            ma+pharma at alpha=1.5): destroyed 31.4% -> 7.7% pooled vs 8.6% for
-            the previous ``Qwen/Qwen3.5-2B`` judge, leak unchanged, ZERO visible
-            failures — at ~1/3 the fire cost (~42ms vs ~121ms per gated call;
-            the Qwen3.5 judge's GDN linear-attention layers run HF-eager as a
-            ~113ms fixed-cost sequential scan). The unsloth mirror is ungated,
-            so unauthenticated boxes can pull it. gemma-3-1b was rejected: no
-            class separation (gated FPR 22-46% at every threshold).
+            ``Qwen/Qwen3-1.7B`` — chosen so the DOCUMENTED QUICKSTART (2x80GB,
+            judge co-hosted with the 8B aux pair on cuda:1) always fits:
+            ~3.4 GB resident, plain attention, small transients, ungated,
+            and end-to-end validated (2026-07-16 judge x threshold sweep,
+            ma+pharma at alpha=1.5: destroyed 31.4% unguarded -> 10.8%).
+            WITH >80 GB OF JUDGE-GPU HEADROOM (h200/141GB co-hosted, or a
+            spare 3rd GPU) PREFER ``unsloth/gemma-3-4b-it`` WITH ``threshold
+            0.5`` — the sweep winner: destroyed -> 7.7%, zero visible
+            failures, ~42ms per gated call — but its ~8.6 GB weights tipped
+            an 80 GB card over next to the 8B pair (the benchmark eval arms
+            pin it explicitly; they run on h200s). Also measured: the old
+            ``Qwen/Qwen3.5-2B`` judge repairs to 8.6% but its GDN layers cost
+            a ~113ms fixed HF-eager scan per fire; gemma-3-1b is unusable (no
+            class separation: gated FPR 22-46% at every threshold).
         device: Device for the judge (e.g. ``"cuda:1"``). ``None`` = the default
             layout (:func:`ftp.config.default_device_layout`): the first free GPU
             after P's tensor-parallel ranks and the DD aux devices; failing that,
@@ -100,17 +106,19 @@ class GuardConfig:
             between sweeps (one token per step).
         backtrack: Tokens shown to the judge per check AND tokens discarded on a
             rewind. The window is the last ``backtrack`` tokens of prompt+output.
-        threshold: Trip when p(degenerated) >= threshold. For the gemma-3-4b
-            judge this is nearly a NON-KNOB: its yes/no logits saturate, so the
-            gated operating point is flat from 0.3 to 0.99 (offline on the
-            labeled alpha=1.5 windows: TPR ~86% / FPR ~6-7%; end-to-end 0.5 and
-            0.9 landed within noise — tools/calibrate_guard_threshold.py
-            re-derives this for any candidate judge). 0.5 is kept as the
-            neutral default. A persistent loop is re-checked every sweep, so
-            the effective catch rate compounds toward 1 while a false trip
-            costs only one recoverable rewind. (History: the original
-            Qwen3.5-2B judge measured TPR 0.80 / FPR 0.02 per check at gate
-            1.6 + threshold 0.5.)
+        threshold: Trip when p(degenerated) >= threshold. Default 0.8 = the
+            Qwen3-1.7B judge's end-to-end winner (vs 0.5: less destruction,
+            35% fewer rollbacks, 1 vs 5 visible failures) — and both finalist
+            judges are nearly threshold-FLAT (saturated yes/no logits;
+            offline gated operating points move only a few points from 0.3 to
+            0.99), so 0.8 is also fine for gemma-3-4b (which the eval arms pin
+            at 0.5, within noise of 0.9 end-to-end).
+            tools/calibrate_guard_threshold.py re-derives the operating table
+            for any candidate judge from the labeled windows. A persistent
+            loop is re-checked every sweep, so the effective catch rate
+            compounds toward 1 while a false trip costs only one recoverable
+            rewind. (History: the original Qwen3.5-2B judge measured TPR 0.80
+            / FPR 0.02 per check at gate 1.6 + threshold 0.5.)
         gate_ratio: zlib pre-gate: a window is only shown to the judge when
             ``len(bytes)/len(zlib(bytes)) >= gate_ratio`` (loops compress;
             normal prose sits ~0.6-1.2 at window size). Kills most judge
@@ -149,11 +157,11 @@ class GuardConfig:
             sweep) is one forward either way. 0 disables the cap.
     """
 
-    model: str = "unsloth/gemma-3-4b-it"
+    model: str = "Qwen/Qwen3-1.7B"
     device: str | None = None
     interval: int = 25
     backtrack: int = 50
-    threshold: float = 0.5
+    threshold: float = 0.8
     marker: str = "<|fim_pad|>"
     dtype: str = "bfloat16"
     tries: int = 2

@@ -78,10 +78,10 @@ benchmarks below are NOTHINK, so `--think` is off the measured config.
 ### The live degeneration guard (on by default with DD)
 
 Under a strong DD push a reply can occasionally collapse into a repeating loop or
-symbol spam. A small judge LM (`unsloth/gemma-3-4b-it` — an ungated mirror, so it
-downloads without a HF login — loaded on the aux GPU) watches every
-reply as it generates: every 25 engine steps it reads the newest 50 tokens, and when it
-sees mechanical collapse the reply is **rewound 50 tokens and resampled** — the fusion
+symbol spam. A small judge LM (`Qwen/Qwen3-1.7B` by default — ungated, and small
+enough that the documented 2×80GB setup always fits — loaded on the aux GPU) watches
+every reply as it generates: every 25 engine steps it reads the newest 50 tokens, and
+when it sees mechanical collapse the reply is **rewound 50 tokens and resampled** — the fusion
 (and therefore the unlearning) stays at full strength, only the collapse is repaired.
 If a reply keeps breaking at the same spot, the rewind deepens (100, 150, … tokens);
 one that can't produce ANY clean text returns
@@ -91,7 +91,11 @@ Because of the rewind window, **streaming is held back by ~50 tokens**: text app
 blocks once it can no longer be rewound (about a second behind generation), and on the
 rare deep rewind the runner prints `⟲ retracting the passage above and rewriting`.
 `--no-guard` disables the whole mechanism; `--guard-interval/--guard-backtrack/
---guard-threshold/--guard-tries` tune it. The judge adds one small batched forward per
+--guard-threshold/--guard-tries` tune it. **Got more than 80 GB on the judge's GPU**
+(an H200, or a spare third card via `--guard-device`)? Run the best-measured judge
+instead: `--guard-model unsloth/gemma-3-4b-it --guard-threshold 0.5` — it repairs
+more of the collapse (7.7% vs 10.8% destroyed in our α=1.5 stress sweep) but its
+weights are too big to share an 80 GB card with the aux pair. The judge adds one small batched forward per
 25 steps on the aux GPU — throughput impact is negligible, and replies that never
 degenerate are never interrupted.
 
