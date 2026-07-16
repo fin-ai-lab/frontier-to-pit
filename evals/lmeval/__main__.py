@@ -546,6 +546,39 @@ for _tag, _gk in {
         "alphas": [1.5],
     }
 
+# Guard judge x threshold MACRO sweep (2026-07-16, ma+pharma). Motivation: the
+# per-step latency bench showed the judge cost is FIXED per call and the
+# Qwen3.5-2B judge pays a ~113ms HF-eager GDN sequential scan per fire — a
+# plain-attention judge is 2-3x cheaper. Offline calibration on the labeled
+# alpha=1.5 windows (tools/calibrate_guard_threshold.py) ranked the ungated
+# candidates: gemma-3-1b is unusable (no class separation: gated FPR 22-46% at
+# EVERY threshold), gemma-3-4b is strong and threshold-INSENSITIVE (TPR ~86% /
+# FPR ~6% from 0.3 to 0.99 — its p-values saturate), Qwen3-1.7B is flat around
+# TPR ~77% / FPR ~3.9%. Arms cover each judge's plausible range (gemma-1b kept
+# in to confirm/refute the offline read end-to-end); references = the
+# registered ftp_v6guard_ (Qwen3.5-2B thr 0.5) and ftp_v6lin_ a1.5 arms re-run
+# on the same engine. unsloth mirrors so unauthenticated boxes can pull them.
+for _tag, (_jm, _thr) in {
+    "j1b_t90":  ("unsloth/gemma-3-1b-it", 0.90),
+    "j1b_t999": ("unsloth/gemma-3-1b-it", 0.999),
+    "j4b_t50":  ("unsloth/gemma-3-4b-it", 0.50),
+    "j4b_t90":  ("unsloth/gemma-3-4b-it", 0.90),
+    "j17_t50":  ("Qwen/Qwen3-1.7B", 0.50),
+    "j17_t80":  ("Qwen/Qwen3-1.7B", 0.80),
+}.items():
+    MODELS[f"ftp_v6guard_{_tag}_a1.5_L48c10_L27c0"] = {
+        "backend": "dd",
+        "args": {**_DD_QWEN_ARGS, "aux_p": _v6_pairs["partialsft"][0],
+                 "aux_q": _v6_pairs["partialsft"][1], "fuse_pin": True,
+                 "dd_guard": True,
+                 "dd_guard_kwargs": {"model": _jm, "threshold": _thr},
+                 "steer": SteerArgs(triples=[(48, 28961, 10.0)], family="topk",
+                                    sae_dir=_SAE_DIR)},
+        "gen_kwargs": {**QWEN_GEN, **QWEN_SAMPLING, "max_gen_toks": 4096},
+        "util_max_gen_toks": 16384,
+        "alphas": [1.5],
+    }
+
 # v3.3.1 = the chosen v3.3 "Ours" config RE-RUN under the v4 sampling policy (temp-1.0
 # preset, matched budgets) so the v3.3-vs-v4 aux comparison is decoding-matched — the
 # original v3.3 diamonds ran T=0.7/rep-pen 1.1/2048-tok utility gen. Aux pair = the
