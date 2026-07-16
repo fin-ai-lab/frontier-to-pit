@@ -1023,7 +1023,8 @@ class GuardLogitsProcessor(AdapterLogitsProcessor):
         # put the judge on the last TP rank (riding sharded P's spare memory).
         # Under TP the judge loads at its first sweep instead — post-profiling,
         # post-capture; vLLM is blind to it then, so gpu_memory_utilization must
-        # leave it ~8 GB (2B judge measured ~7 GB at a 64-row sweep). TP=1 keeps the eager load (before profiling = its
+        # leave it ~6 GB (2B judge weights + activations). TP=1 keeps the
+        # eager load (before profiling = its
         # footprint is accounted automatically).
         self._judge: DegenJudge | None = None
         if tp_world > 1:

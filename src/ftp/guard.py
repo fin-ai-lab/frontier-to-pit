@@ -80,7 +80,7 @@ class GuardConfig:
             after P's tensor-parallel ranks and the DD aux devices; failing that,
             under TP the LAST TP rank (sharded P leaves spare memory there — the
             judge loads post-profiling, so keep ``gpu_memory_utilization`` low
-            enough to leave it ~8 GB — measured ~7 GB at a 64-row sweep), else the aux GPU. On 2xGPU the judge sits
+            enough to leave it ~6 GB), else the aux GPU. On 2xGPU the judge sits
             next to the aux pair on cuda:1; on 4xGPU TP=2 (aux pair split over
             cuda:2/cuda:3) it rides cuda:1; single-GPU boxes co-host it with P.
         interval: Judge every N ENGINE steps — one batched forward over all
