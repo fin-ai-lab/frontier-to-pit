@@ -416,6 +416,22 @@ MODELS["ftp_v6lin_a1.5_L48c10_L27c0"] = {
     "alphas": [1.5],
 }
 
+# Thinking twin of the production config (production think candidate: same single
+# feature, alpha=1.125, reasoning budgets, no <think> ban). Matches the pruned
+# ftp_v6think_* grid's conventions: enable_thinking template + </think> strip on
+# utility.
+MODELS["ftp_v6lin_think_L48c10_L27c0"] = {
+    "backend": "dd",
+    "args": {**_DD_QWEN_ARGS, "aux_p": _v6_pairs["partialsft"][0],
+             "aux_q": _v6_pairs["partialsft"][1], "fuse_pin": True,
+             "enable_thinking": True, "think_end_token": "</think>",
+             "steer": SteerArgs(triples=[(48, 28961, 10.0)], family="topk",
+                                sae_dir=_SAE_DIR)},
+    "gen_kwargs": {**QWEN_SAMPLING, "max_gen_toks": 16384},
+    "util_max_gen_toks": 16384,
+    "alphas": [1.125],
+}
+
 # v3.3.1 = the chosen v3.3 "Ours" config RE-RUN under the v4 sampling policy (temp-1.0
 # preset, matched budgets) so the v3.3-vs-v4 aux comparison is decoding-matched — the
 # original v3.3 diamonds ran T=0.7/rep-pen 1.1/2048-tok utility gen. Aux pair = the
