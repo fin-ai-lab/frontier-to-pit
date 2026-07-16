@@ -420,17 +420,34 @@ MODELS["ftp_v6lin_a1.5_L48c10_L27c0"] = {
 # one entry PER alpha so results land as ftp_v6lin_nosteer_think_a<a>__alpha=<a>.json —
 # the exact filenames plot_unlearning_think.py (website) reads for its alpha curve.
 # Re-added 2026-07-16 after the think grid was pruned (the sqa results were deleted in
-# the temporal final-artifact cleanup and need regenerating).
+# the temporal final-artifact cleanup and need regenerating). The _v6guard_ twins are
+# the same sweep with the live degeneration guard on (guard-vs-not on the dose-response,
+# internal record — the website reads the unguarded stems).
 for _a in (1.125, 1.25, 1.375, 1.5):
-    MODELS[f"ftp_v6lin_nosteer_think_a{_a:g}"] = {
-        "backend": "dd",
-        "args": {**_DD_QWEN_ARGS, "aux_p": _v6_pairs["partialsft"][0],
-                 "aux_q": _v6_pairs["partialsft"][1], "fuse_pin": True,
-                 "enable_thinking": True, "think_end_token": "</think>"},
-        "gen_kwargs": {**QWEN_SAMPLING, "max_gen_toks": 16384},
-        "util_max_gen_toks": 16384,
-        "alphas": [_a],
-    }
+    for _guard in (False, True):
+        _stem = "ftp_v6guard_nosteer_think_a" if _guard else "ftp_v6lin_nosteer_think_a"
+        MODELS[f"{_stem}{_a:g}"] = {
+            "backend": "dd",
+            "args": {**_DD_QWEN_ARGS, "aux_p": _v6_pairs["partialsft"][0],
+                     "aux_q": _v6_pairs["partialsft"][1], "fuse_pin": True,
+                     **({"dd_guard": True} if _guard else {}),
+                     "enable_thinking": True, "think_end_token": "</think>"},
+            "gen_kwargs": {**QWEN_SAMPLING, "max_gen_toks": 16384},
+            "util_max_gen_toks": 16384,
+            "alphas": [_a],
+        }
+
+# Guarded twin of the INSTRUCT sqa dose-response sweep (ftp_qwen_v6_partialsft: pure DD,
+# no steering, NOTHINK, alphas swept in-process from one engine load). Same grid, only
+# `dd_guard` differs — guard-vs-not on the instruct dose-response (internal record).
+MODELS["ftp_v6guard_nosteer"] = {
+    "backend": "dd",
+    "args": {**_DD_QWEN_ARGS, "aux_p": _v6_pairs["partialsft"][0],
+             "aux_q": _v6_pairs["partialsft"][1], "fuse_pin": True, "dd_guard": True},
+    "gen_kwargs": {**QWEN_GEN, **QWEN_SAMPLING, "max_gen_toks": 4096},
+    "util_max_gen_toks": 16384,
+    "alphas": [1.25, 1.375, 1.5, 1.625, 1.75],
+}
 
 # Thinking twin of the production config (production think candidate: same single
 # feature, alpha=1.125, reasoning budgets, no <think> ban). Matches the pruned
