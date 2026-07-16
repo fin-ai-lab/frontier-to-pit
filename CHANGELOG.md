@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **README stated the DD formula with the operands swapped** — `l_P + α·(l_forget
+  − l_retain)`, which is the sign that would ADD the post-cutoff knowledge. The
+  implementation is and always was `l_P + α·(l_q − l_p)` with `aux_q` = retain and
+  `aux_p` = forget, i.e. `l_P + α·(l_retain − l_forget)`. Docs only; no behaviour
+  change.
+
 ### Changed
 
 - **Aux engine replaced with a paged-KV design** (same class name and public

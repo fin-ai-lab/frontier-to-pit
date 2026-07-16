@@ -7,7 +7,7 @@ and other settings where look-ahead bias is a confounder.
 Two interventions, usable alone or composed (we usually use both):
 
 - **Divergence Decoding (DD)** — unlearning via a forget/retain pair of small
-  auxiliary models: `l = l_P + α·(l_forget − l_retain)`.
+  auxiliary models: `l = l_P + α·(l_retain − l_forget)`.
 - **SAE Feature Steering** — clamp interpretable features that reason from a
   historical perspective.
 
