@@ -410,7 +410,11 @@ MODELS["pit_4b_2015_chat_greedy"] = {
 # Production "Ours" eval config (kept standalone after the v6 steering grid was pruned):
 # alpha=1.5, single feature L48:28961@10 (L27 off), rank OFF, NOTHINK, partialsft aux —
 # the recipe run.py serves. Lets the full eval suite still be reproduced for the shipped
-# config. Full-config scoring: streamingqa runs with the steering on, same as the sweep.
+# config. streamingqa is EXCLUDED (skip_tasks) as of 2026-07-16: settled after a
+# back-and-forth with the advisor — the steered config is NOT scored on streamingqa;
+# the unlearning figure's "Ours" is the pure-DD dose-response (ftp_qwen_v6_partialsft),
+# and no steered sqa arm exists in either prompt format. Same on the think/guard twins.
+_STEERED_SKIP_TASKS = ["streamingqa", "streamingqa_bradfordsystemprompt"]
 MODELS["ftp_v6lin_a1.5_L48c10_L27c0"] = {
     "backend": "dd",
     "args": {**_DD_QWEN_ARGS, "aux_p": _v6_pairs["partialsft"][0],
@@ -420,6 +424,7 @@ MODELS["ftp_v6lin_a1.5_L48c10_L27c0"] = {
     "gen_kwargs": {**QWEN_GEN, **QWEN_SAMPLING, "max_gen_toks": 4096},
     "util_max_gen_toks": 16384,
     "alphas": [1.5],
+    "skip_tasks": _STEERED_SKIP_TASKS,
 }
 
 # Think-mode DD dose-response sweep (NO steering, thinking ON, v6 partialsft aux):
@@ -469,6 +474,7 @@ MODELS["ftp_v6lin_think_L48c10_L27c0"] = {
     "gen_kwargs": {**QWEN_SAMPLING, "max_gen_toks": 16384},
     "util_max_gen_toks": 16384,
     "alphas": [1.125],
+    "skip_tasks": _STEERED_SKIP_TASKS,
 }
 
 # GUARDED twins of the production config: the live degeneration guard (ftp.guard —
@@ -490,6 +496,7 @@ MODELS["ftp_v6guard_a1.5_L48c10_L27c0"] = {
     "gen_kwargs": {**QWEN_GEN, **QWEN_SAMPLING, "max_gen_toks": 4096},
     "util_max_gen_toks": 16384,
     "alphas": [1.5],
+    "skip_tasks": _STEERED_SKIP_TASKS,
 }
 # Guarded thinking twin (same single feature, alpha=1.125, reasoning budgets,
 # no <think> ban).
@@ -504,6 +511,7 @@ MODELS["ftp_v6guard_think_L48c10_L27c0"] = {
     "gen_kwargs": {**QWEN_SAMPLING, "max_gen_toks": 16384},
     "util_max_gen_toks": 16384,
     "alphas": [1.125],
+    "skip_tasks": _STEERED_SKIP_TASKS,
 }
 
 # Guard hyperparameter sweep (2026-07-16, ma+pharma): the two residual failure
@@ -864,6 +872,15 @@ def main() -> None:
 
     spec = MODELS[args.model]
     task_names = resolve_tasks(args.tasks)
+    # Per-config task exclusions (e.g. the steered production arms never score
+    # streamingqa — see _STEERED_SKIP_TASKS). Applies even to explicit --tasks so a
+    # habitual "all"/copy-pasted submit can't resurrect a retired arm; delete the
+    # spec's skip_tasks entry to force a run.
+    skipped = [t for t in task_names if t in set(spec.get("skip_tasks") or [])]
+    if skipped:
+        task_names = [t for t in task_names if t not in skipped]
+        print(f"[skip_tasks] {args.model}: {skipped} excluded by this config's spec; "
+              f"remaining tasks={task_names}", flush=True)
     # Arms: linear alphas + rank-DD k values ("rank_ks") + composed linear+rank
     # (alpha, k) pairs ("alpha_rank_arms"), all from ONE engine load.
     arms = list(spec.get("alphas") or []) + [("rank", int(k)) for k in spec.get("rank_ks") or []]
