@@ -98,6 +98,11 @@ class GuardConfig:
             ``len(bytes)/len(zlib(bytes)) >= gate_ratio`` (loops compress;
             normal prose sits ~0.6-1.2 at window size). Kills most judge
             false-positives AND ~10x-es down judge load. 0 disables the gate.
+            Default 1.3 (2026-07-16 gate x rounds sweep): NONWORDS garble
+            escapes a 1.6 gate because a half-prose/half-garble window
+            compresses ~1.3-1.4 — 1.3 cut ma text-destruction 15.5 -> 5.4% and
+            pharma 26 -> 11% at unchanged leak, while 1.0 (gate ~open) traded
+            it for 7-15% visible FAIL_TEXT and halved generation lengths.
         marker: Token string forced on a trip and registered as a stop token.
         dtype: Judge dtype.
         tries: No-progress rescue attempts at one stuck point before the
@@ -108,6 +113,10 @@ class GuardConfig:
             round can trip the judge at most once, this is the "you can only
             fail the judge N times" bound that makes near-infinite rescue loops
             impossible. Past it, the clean accepted prefix is returned as-is.
+            Default 10, paired with gate 1.3 (same sweep): rounds only matter
+            once the gate actually generates trips, and 10 ends the rescue
+            marathons that used to run to the token budget and leave loop
+            debris; alone (gate 1.6) neither 10 nor 5 moved anything.
         min_tokens: A row is only judged once it has generated at least this
             many tokens. Guards the early steps: a 2-token output like ``**``
             inside a sweep window is indistinguishable from symbol spam even
@@ -123,9 +132,9 @@ class GuardConfig:
     marker: str = "<|fim_pad|>"
     dtype: str = "bfloat16"
     tries: int = 2
-    max_rounds: int = 20
+    max_rounds: int = 10
     min_tokens: int = 25
-    gate_ratio: float = 1.6
+    gate_ratio: float = 1.3
 
     def __post_init__(self) -> None:
         if self.interval < 1:
@@ -354,7 +363,7 @@ def rollback_generate(
     marker_id: int,
     backtrack: int,
     tries: int = 2,
-    max_rounds: int = 20,
+    max_rounds: int = 10,
     decode,
     use_tqdm: bool = False,
 ):

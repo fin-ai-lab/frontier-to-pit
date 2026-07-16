@@ -507,6 +507,11 @@ MODELS["ftp_v6guard_think_L48c10_L27c0"] = {
 # Long rescue sessions accumulate loop debris and run to the token budget, so
 # lower max_rounds gives up earlier and returns the clean accepted prefix.
 # One factor at a time plus both-lever combos; all else = the production guard.
+# OUTCOME: g13r10 won (ma text-destroyed 15.5->5.4%, pharma 26->11.2%, leak
+# unchanged) and its values are now the GuardConfig DEFAULTS (gate 1.3, rounds
+# 10) — so the plain ftp_v6guard_ production arms already run the winner, and
+# re-running these sweep cells would no longer reproduce the original grid
+# (partial kwargs inherit the new defaults, not the old 1.6/20 baseline).
 for _tag, _gk in {
     "g13":    {"gate_ratio": 1.3},
     "g10":    {"gate_ratio": 1.0},
