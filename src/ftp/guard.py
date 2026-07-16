@@ -343,7 +343,16 @@ class DegenJudge:
         enc = self._tok(prompts, return_tensors="pt", padding=True,
                         add_special_tokens=False).to(self._device)
         with torch.inference_mode():
-            logits = self._model(**enc).logits[:, -1, :].float()
+            # Only the LAST position is read, so don't materialize the full
+            # [rows, seq, vocab] logits tensor: at Qwen's 248k vocab that is
+            # ~0.5 MB/position, and a 26-row sweep asked for 3.25 GiB — OOMing
+            # a judge co-hosted on a P TP rank (measured, 4xH100 job 168230).
+            # logits_to_keep=1 computes [rows, 1, vocab] (~13 MB) instead.
+            try:
+                out = self._model(**enc, logits_to_keep=1)
+            except TypeError:  # a forward without the kwarg (exotic judge arch)
+                out = self._model(**enc)
+            logits = out.logits[:, -1, :].float()
         yes = torch.logsumexp(logits[:, self._yes_ids], dim=-1)
         no = torch.logsumexp(logits[:, self._no_ids], dim=-1)
         return torch.sigmoid(yes - no).tolist()  # p(yes) within the {yes, no} pair
