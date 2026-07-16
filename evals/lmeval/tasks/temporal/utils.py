@@ -322,7 +322,6 @@ def pharma_process_results(doc, results) -> dict:
 _COVID_PROMPT = (
     "The following is a section of an MD&A for {firm}:\n{mda}\n"
     "The call took place on {date}.\n"
-    "Consider only information up to and including the earnings call.\n"
     "Predict the potential risks for this company in {risk_year}"
 )
 # metric-key -> phrase to match (lowercased substring).

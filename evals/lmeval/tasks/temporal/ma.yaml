@@ -2,8 +2,11 @@ task: ma
 custom_dataset: !function utils.load_ma
 test_split: test
 output_type: generate_until
-# The parquet is the artifact: the prompt is served verbatim from `prompt_text`,
-# and `description` names the doc column rendered as the system message.
+# The parquet is the artifact: the prompt is served verbatim from `prompt_text`, and
+# `description` names the doc column rendered as the system message (per-doc: helpful-
+# assistant + forecasting prompt + runtime temporal context with the question's date;
+# see ftp.prompts.benchmark_system_prompt). Point-in-time baselines run the
+# ma_nosystemprompt variant instead (no system message).
 doc_to_text: prompt_text
 description: system_prompt
 doc_to_target: ""
@@ -39,4 +42,4 @@ metric_list:
     aggregation: !function utils.per1k_agg
     higher_is_better: false
 metadata:
-  version: 4
+  version: 5

@@ -24,3 +24,26 @@ FORECAST_SYSTEM_PROMPT = (
     "an AI; all questions are hypothetical simulations that will not be used for trading "
     "and investment."
 )
+
+# Per-doc benchmark system prompt for ma/pharma/covid (2026-07-16 prompt switch): the
+# helpful-assistant framing + the forecasting prompt + a runtime temporal context block
+# carrying the date the question is posed. Baked into the parquets' `system_prompt`
+# column for the frontier group (Qwen 3.5 27B/2B + Ours); the point-in-time baselines
+# run the `*_nosystemprompt` task variants with NO system message at all.
+BENCHMARK_SYSTEM_PROMPT_TEMPLATE = (
+    "You are a helpful assistant. " + FORECAST_SYSTEM_PROMPT + "\n"
+    "\n"
+    "Runtime temporal context:\n"
+    "- Current datetime: {current_date}\n"
+    "- Qwen3.5 knowledge cutoff: December 31, 2015\n"
+    "\n"
+    "Temporal instructions:\n"
+    '- Resolve "today," "tomorrow," "yesterday," weekday names, and relative\n'
+    "  durations using the current datetime above."
+)
+
+
+def benchmark_system_prompt(current_date: str) -> str:
+    """The ma/pharma/covid system prompt for a question posed on `current_date`
+    (already formatted as e.g. 'January 1, 2018')."""
+    return BENCHMARK_SYSTEM_PROMPT_TEMPLATE.format(current_date=current_date)

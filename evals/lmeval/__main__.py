@@ -63,13 +63,19 @@ UTILITY_TASKS = ["mmlu_pro", "mmlu_redux_generative", "ifeval", "gpqa_diamond_co
 # UI sugar below — run it explicitly with --tasks streamingqa.
 # streamingqa_longersystemprompt = the advisor's prompt-format variant (date-bearing
 # system prompt, bare-question user turn); same data/judge, own results dir.
-TEMPORAL_TASKS = ["ma", "pharma", "covid", "streamingqa", "streamingqa_longersystemprompt"]
+# ma/pharma/covid carry the per-doc benchmark system prompt (helpful-assistant +
+# forecasting prompt + runtime temporal context) for the frontier group; the
+# *_nosystemprompt twins serve the SAME data with NO system message (the
+# point-in-time baselines: aux/pit/chrono/talkie).
+TEMPORAL_TASKS = ["ma", "pharma", "covid", "streamingqa", "streamingqa_longersystemprompt",
+                  "ma_nosystemprompt", "pharma_nosystemprompt", "covid_nosystemprompt"]
 # Default leak@k repeats per temporal task (the canonical sweep config; --temporal-n
 # overrides ALL temporal tasks uniformly if given). ma/covid single-shot (leak@1),
 # pharma leak@4. streamingqa is ALWAYS single-shot now (repeats: 1) — it's judged (gemma
 # in-job), not leak@k, and 8 reps made the full-set think runs take ~day-scale for no gain.
 TEMPORAL_N = {"ma": 1, "covid": 1, "pharma": 4, "streamingqa": 1,
-              "streamingqa_longersystemprompt": 1}
+              "streamingqa_longersystemprompt": 1,
+              "ma_nosystemprompt": 1, "covid_nosystemprompt": 1, "pharma_nosystemprompt": 4}
 # Per-CATEGORY doc cap for the heavy utility tasks. mmlu_pro (14 categories) and mmlu_redux
 # (57 subjects) are multi-subtask GROUPS, so lm-eval's int `limit` caps EACH subtask (the
 # first N of every category): 30 -> mmlu_pro ~420 docs, mmlu_redux ~1710. Keeps the long-CoT
@@ -339,10 +345,16 @@ for _tag, (_p6, _q6) in _v6_pairs.items():  # _p6 = le2025 (forget), _q6 = le201
     # _tag loop: a module-level version below only ever saw the LAST _tag ("fullsft"),
     # silently dropping the nosft/partialsft littles (2026-07-14 bug).
     for _year, _lpath in (("2025", _p6), ("2015", _q6)):
+        # v6 littles decoding convention (2026-07-16, replaces the *_temp0 twin): LAB
+        # tasks sample at the temp-1.0 QWEN preset; utility runs GREEDY (do_sample off,
+        # sampling knobs + penalties dropped — a large presence_penalty on argmax blocks
+        # needed token reuse). util_gen_kwargs REPLACES gen_kwargs on non-temporal tasks.
         MODELS[f"v6_{_tag}_{_year}"] = {
             "backend": "vllm",
             "args": {**_V4_LITTLE_ARGS, "pretrained": _lpath, "enable_thinking": False},
             "gen_kwargs": {**QWEN_GEN, **QWEN_SAMPLING, "max_gen_toks": 4096},
+            "util_gen_kwargs": {**QWEN_GEN, "do_sample": False, "temperature": 0.0,
+                                "max_gen_toks": 16384},
             "util_max_gen_toks": 16384,
         }
         MODELS[f"v6_{_tag}_{_year}_think"] = {
@@ -353,22 +365,10 @@ for _tag, (_p6, _q6) in _v6_pairs.items():  # _p6 = le2025 (forget), _q6 = le201
             "util_max_gen_toks": 16384,
         }
 
-# GREEDY (temp-0) twin of the v6 partialsft aux LITTLE model, 2015 (le2015=retain) ONLY,
-# NOTHINK — probe whether greedy decoding beats the temp-1.0 QWEN_SAMPLING preset on the
-# standalone-aux benchmarks (2026-07-14 curiosity run). DISTINCT `_temp0` name so the
-# temp-1.0 result (v6_partialsft_2015__base.json) is never overwritten. Greedy =
-# do_sample off + temperature 0; the sampling knobs (top_p/top_k/min_p) and the
-# presence/repetition penalties are DROPPED (meaningless or actively harmful at greedy — a
-# large presence_penalty on argmax decoding blocks needed token reuse). <think> ban kept;
-# same budgets (4096 temporal / 16384 utility) as the temp-1.0 twin.
-MODELS["v6_partialsft_2015_temp0"] = {
-    "backend": "vllm",
-    "args": {**_V4_LITTLE_ARGS, "pretrained": _v6_pairs["partialsft"][1],
-             "enable_thinking": False},
-    "gen_kwargs": {**QWEN_GEN, "do_sample": False, "temperature": 0.0,
-                   "max_gen_toks": 4096},
-    "util_max_gen_toks": 16384,
-}
+# (The one-off `v6_partialsft_2015_temp0` greedy twin was folded into the entries
+# above on 2026-07-16: utility now ALWAYS runs greedy on the v6 littles via
+# util_gen_kwargs, LAB stays temp-1.0. Its winning utility results were renamed to
+# the plain v6_partialsft_2015 stems in the result stores.)
 
 # PIT-4B-FT-201511 prompted the way its own model card documents (<|user|>/<|assistant|>
 # role markers, stop on <|end|>) rather than the Alpaca format the PIT repo's IFEval script
@@ -812,6 +812,10 @@ def run_task(inst, spec, task_name, *, tm, args, alpha) -> None:
     # redux/ifeval/gpqa = 0; the temporal YAMLs pin num_fewshot: 0.
     num_fewshot = None
     gen_kwargs = dict(spec.get("gen_kwargs", {}))
+    # util_gen_kwargs REPLACES gen_kwargs wholesale on non-temporal tasks (e.g. the v6
+    # littles: greedy utility / temp-1.0 LAB); util_max_gen_toks still applies after.
+    if not is_temporal and spec.get("util_gen_kwargs") is not None:
+        gen_kwargs = dict(spec["util_gen_kwargs"])
     if not is_temporal and spec.get("util_max_gen_toks"):
         gen_kwargs["max_gen_toks"] = spec["util_max_gen_toks"]
     # GPQA cot_zeroshot elicits long step-by-step reasoning that the general util cap truncates
