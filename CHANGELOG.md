@@ -38,6 +38,19 @@ adheres to [Semantic Versioning](https://semver.org/).
   tokens are held back until they survive the walk-back window, so a rewind
   never has to un-print (the visible stream trails generation by ~1 s).
 
+- **4×GPU layout support** (`ftp.config.default_device_layout`; `run.py
+  --guard-device`; `ftp.probe --tp`). Device placement is now derived from the
+  visible GPU count and P's `--tensor-parallel-size` instead of assuming the
+  2×GPU split: the aux pair defaults to the first GPU after P's TP ranks and the
+  guard judge to the next free one (2×GPU TP=1: P | aux+guard on `cuda:1`,
+  unchanged; 4×GPU TP=2: P sharded over `cuda:0`–`1`, aux on `cuda:2`, guard on
+  `cuda:3`). Motivation: `--think` at its 20480 default context does not fit
+  next to the aux pair + guard on 2×H100 — on a 4×GPU box
+  `run.py chat --think --tensor-parallel-size 2` now lays itself out correctly
+  with no device flags. The guard's engine-side default (env route) follows the
+  same layout; `ftp.probe --tp N` models P's weights+KV sharded over N ranks and
+  prints the per-GPU fit, aux/guard placement, and `gpu_memory_utilization`.
+
 ### Fixed
 
 - **README stated the DD formula with the operands swapped** — `l_P + α·(l_forget

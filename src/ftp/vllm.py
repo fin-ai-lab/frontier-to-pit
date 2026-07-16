@@ -50,7 +50,7 @@ from vllm import SamplingParams
 from vllm.v1.sample.logits_processor import AdapterLogitsProcessor
 from vllm.v1.sample.logits_processor.interface import BatchUpdate
 
-from ftp.config import DDConfig
+from ftp.config import DDConfig, default_device_layout
 from ftp.core import build_special_ids, dd_fuse
 from ftp.engine import AuxBatchedEngine
 from ftp.guard import (
@@ -940,13 +940,17 @@ class GuardLogitsProcessor(AdapterLogitsProcessor):
 
         # Same TP contract as DDLogitsProcessor: vLLM gathers logits to rank 0;
         # other ranks never see real logits, so they must not load a judge copy.
-        tp_rank = 0
+        tp_rank, tp_world = 0, 1
         try:
-            from vllm.distributed import get_tensor_model_parallel_rank
+            from vllm.distributed import (
+                get_tensor_model_parallel_rank,
+                get_tensor_model_parallel_world_size,
+            )
 
             tp_rank = get_tensor_model_parallel_rank()
+            tp_world = get_tensor_model_parallel_world_size()
         except Exception:  # noqa: BLE001 — outside a TP worker there is no group
-            tp_rank = 0
+            tp_rank, tp_world = 0, 1
         self._inert = tp_rank > 0
         if self._inert:
             print(f"[GuardLogitsProcessor] TP rank {tp_rank}: inert", flush=True)
@@ -961,13 +965,18 @@ class GuardLogitsProcessor(AdapterLogitsProcessor):
         self._marker = resolve_marker_id(self._tok, cfg.marker)
         self._eos = self._tok.eos_token_id
 
-        # Judge placement: explicit cfg.device > the DD aux device (the guard's
-        # documented default home: the second GPU, next to the aux pair) > the
-        # last visible GPU when there is more than one > P's own device.
-        dev = cfg.device or os.environ.get("DD_AUX_DEVICE") or None
+        # Judge placement: explicit cfg.device, else the default layout — the
+        # first free GPU after P's TP ranks and the aux pair (DD_AUX_DEVICE),
+        # collapsing onto the aux GPU when there is none (2xGPU: judge next to
+        # the aux pair on cuda:1; 4xGPU TP=2: judge alone on cuda:3) — else
+        # P's own device on a single-GPU box.
+        dev: str | torch.device | None = cfg.device
         if dev is None:
             n = torch.cuda.device_count() if torch.cuda.is_available() else 0
-            dev = f"cuda:{n - 1}" if n > 1 else device
+            _, dev = default_device_layout(
+                n, tp_world, aux_device=os.environ.get("DD_AUX_DEVICE") or None
+            )
+            dev = dev or device
         self._judge_device = torch.device(dev)
         self._judge = DegenJudge(cfg, self._judge_device)
         self._steps = 0

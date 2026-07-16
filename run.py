@@ -31,6 +31,14 @@ exploratory, not a benchmarked config. Pass --model Qwen/Qwen3.5-27B-FP8 for FP8
 (smaller/faster, but untested with DD+steering — it can destabilize the fused decode).
 The 27B P needs an ≥80GB GPU (or --tensor-parallel-size 2 on 40GB cards). Aux
 models download from the Hugging Face Hub by default.
+
+Multi-GPU placement is automatic from the visible GPU count and
+--tensor-parallel-size: the aux pair takes the first GPU after P's TP ranks and
+the guard judge the next free one (2xGPU TP=1: P | aux+guard; 4xGPU TP=2:
+P P | aux | guard). --think at the full 20480 context does not fit next to the
+aux pair + guard on 2xH100 — on a 4xGPU box run
+``python run.py chat --think --tensor-parallel-size 2`` and the layout above is
+picked up automatically (--aux-device / --guard-device override it).
 """
 from __future__ import annotations
 
@@ -119,7 +127,8 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
                     help=f"P context window (default {DEFAULT_MAX_MODEL_LEN}, or "
                          f"{THINK_MAX_MODEL_LEN} with --think, which must fit prompt + CoT)")
     ap.add_argument("--aux-device", default=None,
-                    help="GPU for the aux pair, e.g. cuda:1 (default: last GPU when >1 is visible, "
+                    help="GPU for the aux pair, e.g. cuda:1 (default: first GPU after P's "
+                         "tensor-parallel ranks — cuda:1 on 2xGPU TP=1, cuda:2 on 4xGPU TP=2 — "
                          "keeping the 27B P and the aux models off the same card)")
     ap.add_argument("--gdn-prefill-backend", default=None, choices=["flashinfer", "triton"],
                     help="Qwen3.5 GDN kernel. Default (flashinfer) JIT-compiles via nvcc on the "
@@ -142,6 +151,10 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--no-guard", action="store_true",
                     help="disable the live degeneration guard (guard is on by default with DD)")
     ap.add_argument("--guard-model", default="Qwen/Qwen3.5-2B", help="judge LM (HF)")
+    ap.add_argument("--guard-device", default=None,
+                    help="GPU for the guard judge, e.g. cuda:3 (default: first free GPU after "
+                         "P's TP ranks and the aux pair — cuda:3 on 4xGPU TP=2 — else it shares "
+                         "the aux GPU, as on 2xGPU)")
     ap.add_argument("--guard-interval", type=int, default=25,
                     help="judge every N engine steps (one batched check)")
     ap.add_argument("--guard-backtrack", type=int, default=50,
@@ -153,21 +166,27 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
                          "another --guard-backtrack (50 -> 100 -> 150 ...)")
 
 
-def _resolve_aux_device(args, use_dd: bool) -> str | None:
-    """Default the aux pair onto the last visible GPU on a multi-GPU box.
+def _resolve_devices(args, use_dd: bool) -> tuple[str | None, str | None]:
+    """Place the aux pair and guard judge off P's card(s) on a multi-GPU box.
 
-    P (the 27B) fills most of GPU 0 via gpu_memory_utilization, so co-locating the
-    aux pair there OOMs. On 2xH100 this transparently puts aux on cuda:1."""
-    if not use_dd or args.aux_device is not None:
-        return args.aux_device
+    P fills most of its TP ranks via gpu_memory_utilization, so co-locating the
+    small models there OOMs. ftp.config.default_device_layout does the math:
+    2xGPU TP=1 -> aux+guard on cuda:1; 4xGPU TP=2 -> aux on cuda:2, guard on
+    cuda:3. Explicit --aux-device / --guard-device always win."""
+    if not use_dd:
+        return args.aux_device, args.guard_device
     import torch
-    n = torch.cuda.device_count()
-    return f"cuda:{n - 1}" if n > 1 else None
+
+    from ftp.config import default_device_layout
+    return default_device_layout(
+        torch.cuda.device_count(), args.tensor_parallel_size,
+        aux_device=args.aux_device, guard_device=args.guard_device,
+    )
 
 
 async def _run(args, prompt: str | None) -> None:
     use_dd = not args.no_dd
-    aux_device = _resolve_aux_device(args, use_dd)
+    aux_device, guard_device = _resolve_devices(args, use_dd)
     steer = (
         SteerArgs(parse_steer(args.steer), args.sae_repo, args.sae_cache, args.sae_dir)
         if not args.no_steer and args.steer
@@ -189,7 +208,7 @@ async def _run(args, prompt: str | None) -> None:
     guard_cfg = None
     if use_dd and not args.no_guard:
         guard_cfg = GuardConfig(
-            model=args.guard_model, device=aux_device,
+            model=args.guard_model, device=guard_device,
             interval=args.guard_interval, backtrack=args.guard_backtrack,
             threshold=args.guard_threshold, tries=args.guard_tries,
         )
@@ -221,7 +240,8 @@ async def _run(args, prompt: str | None) -> None:
         print(f"[run] steering on: {desc}", flush=True)
     marker_id = resolve_marker_id(tok, guard_cfg.marker) if guard_cfg else None
     if guard_cfg:
-        print(f"[run] 🛡 guard on: judge={guard_cfg.model} every {guard_cfg.interval} engine "
+        print(f"[run] 🛡 guard on: judge={guard_cfg.model} on "
+              f"{guard_cfg.device or 'cuda:0'} every {guard_cfg.interval} engine "
               f"steps; a tripped reply rewinds {guard_cfg.backtrack} tokens and resamples. "
               f"Streaming holds back the newest {guard_cfg.backtrack} tokens (so a rewind "
               f"never has to un-print) — the visible stream trails generation by ~1s. "

@@ -29,8 +29,14 @@ uv sync --extra vllm
 untested vLLM. Requirements:
 
 - A CUDA-13 GPU box with the CUDA toolkit (`nvcc`) on PATH.
-- An ≥80GB GPU for the 27B model. 2×80GB is recommended: the aux pair is placed on
-  the second GPU automatically (with one GPU, pass a smaller `--gpu-memory-utilization`).
+- An ≥80GB GPU for the 27B model. 2×80GB is recommended: the aux pair (and the
+  degeneration-guard judge) are placed on the second GPU automatically (with one GPU,
+  pass a smaller `--gpu-memory-utilization`).
+- `--think` at its full 20K default context does not fit next to the aux pair on
+  2×80GB — it needs 4×80GB: pass `--tensor-parallel-size 2` and the placement follows
+  automatically (the 27B shards over `cuda:0`–`cuda:1`, the aux pair takes `cuda:2`,
+  the guard judge `cuda:3`). `python -m ftp.probe --tp 2 ...` prints the fit math for
+  your models and budgets.
 
 > **Startup time.** Every launch spends ~1–3 min on vLLM's `torch.compile` + warmup
 > (with steering on — the default — the compile cache is disabled for safety, so this

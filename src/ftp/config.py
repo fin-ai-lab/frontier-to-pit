@@ -215,6 +215,54 @@ class DDConfig:
         return ids
 
 
+def _cuda_index(device: str | None) -> int | None:
+    """``"cuda:2"`` -> ``2``; anything else (None, "cpu", bare "cuda") -> None."""
+    if device and device.startswith("cuda:"):
+        try:
+            return int(device.split(":", 1)[1])
+        except ValueError:
+            return None
+    return None
+
+
+def default_device_layout(
+    n_gpu: int,
+    tensor_parallel_size: int = 1,
+    aux_device: str | None = None,
+    guard_device: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Default ``(aux_device, guard_device)`` for a box with ``n_gpu`` visible GPUs.
+
+    P occupies the tensor-parallel ranks ``cuda:0 .. cuda:{tp-1}``; the aux pair
+    takes the first GPU after P; the guard judge takes the next free one. When
+    there aren't enough GPUs the placements collapse inward: the guard shares
+    the aux GPU, and when P spans every GPU the aux pair co-hosts with the LAST
+    TP rank (rank 0 also hosts the logits gather + sampler, so the last rank's
+    card has the most headroom). Explicit ``aux_device``/``guard_device`` values
+    pass through untouched; the guard default routes around an explicit aux GPU.
+
+    Layouts this produces (P = TP ranks, A = aux pair, G = guard judge)::
+
+        1 GPU            -> (None, None)          everything co-hosts with P
+        2 GPUs, TP=1     -> P | A+G               the classic 2xH100 split
+        4 GPUs, TP=2     -> P P | A | G           the 4xH100 thinking-mode split
+        4 GPUs, TP=1     -> P | A | G  (cuda:3 idle)
+        n GPUs, TP=n     -> P .. P+A+G            aux+guard on the last rank
+    """
+    tp = tensor_parallel_size
+    if aux_device is None and n_gpu > 1:
+        aux_device = f"cuda:{tp}" if tp < n_gpu else f"cuda:{n_gpu - 1}"
+    if guard_device is None:
+        aux_idx = _cuda_index(aux_device)
+        for i in range(min(tp, n_gpu), n_gpu):
+            if i != aux_idx:
+                guard_device = f"cuda:{i}"
+                break
+        else:
+            guard_device = aux_device
+    return aux_device, guard_device
+
+
 def _parse_suppress(raw: str) -> tuple[int | str, ...]:
     """Parse ``DD_SUPPRESS_TOKENS``: comma-separated ids and/or token strings."""
     out: list[int | str] = []

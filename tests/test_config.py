@@ -1,6 +1,7 @@
 import pytest
 
 from ftp import DDConfig
+from ftp.config import default_device_layout
 
 
 def make_cfg(**kw):
@@ -98,3 +99,33 @@ def test_aux_device_round_trip():
     cfg = make_cfg(aux_device="cuda:1")
     assert DDConfig.from_env(cfg.to_env()) == cfg
     assert DDConfig.from_env(make_cfg().to_env()).aux_device is None
+
+
+@pytest.mark.parametrize(
+    ("n_gpu", "tp", "expected"),
+    [
+        (1, 1, (None, None)),  # single GPU: everything co-hosts with P
+        (2, 1, ("cuda:1", "cuda:1")),  # classic 2xH100: aux + guard share cuda:1
+        (2, 2, ("cuda:1", "cuda:1")),  # P spans both: aux+guard on the last rank
+        (3, 1, ("cuda:1", "cuda:2")),
+        (4, 1, ("cuda:1", "cuda:2")),
+        (4, 2, ("cuda:2", "cuda:3")),  # 4xH100 thinking-mode split
+        (4, 4, ("cuda:3", "cuda:3")),
+        (8, 4, ("cuda:4", "cuda:5")),
+    ],
+)
+def test_default_device_layout(n_gpu, tp, expected):
+    assert default_device_layout(n_gpu, tp) == expected
+
+
+def test_default_device_layout_explicit_passthrough():
+    # Explicit values always win, in any combination.
+    assert default_device_layout(4, 2, aux_device="cuda:1", guard_device="cuda:0") == (
+        "cuda:1", "cuda:0")
+    # Explicit aux only: the guard default routes around it.
+    assert default_device_layout(4, 1, aux_device="cuda:2") == ("cuda:2", "cuda:1")
+    assert default_device_layout(2, 1, aux_device="cuda:0") == ("cuda:0", "cuda:1")
+    # Explicit guard only: aux keeps its layout slot.
+    assert default_device_layout(4, 2, guard_device="cuda:3") == ("cuda:2", "cuda:3")
+    # Non-indexable aux device: guard falls back to the first non-P GPU.
+    assert default_device_layout(2, 1, aux_device="cpu") == ("cpu", "cuda:1")

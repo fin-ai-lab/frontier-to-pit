@@ -11,7 +11,12 @@ Usage::
 
     python -m ftp.probe \\
         --p-model /path/or/hub-id --aux-p ... --aux-q ... \\
-        [--concurrency 32] [--window 1024] [--max-len 2048] [--live-aux]
+        [--concurrency 32] [--window 1024] [--max-len 2048] [--tp 2] [--live-aux]
+
+``--tp`` models P sharded over that many GPUs (tensor parallel — weights and
+KV divide across the ranks): the split recommendation becomes e.g. the 4xGPU
+layout P on cuda:0-1, aux pair on cuda:2, guard judge on cuda:3. Use it when P
+alone (long context / thinking budgets) exceeds one card.
 
 The aux footprint estimate models the paged engine: its page pool is
 prewarmed to the ``concurrency × window`` worst case, so the estimate is the
@@ -132,6 +137,9 @@ def recommend(args) -> None:
     print(f"aux pair: ~{aux_total:.1f} GB ({detail})")
 
     cap = caps[0]
+    tp = args.tp
+    if tp < 1 or tp > n_gpu:
+        raise SystemExit(f"--tp {tp} needs 1 <= tp <= visible GPUs ({n_gpu})")
     print("\n— Placement —")
     single_need = p_w + aux_total + kv_pool + WORKSPACE_GB
     util_single = (p_w + WORKSPACE_GB + kv_pool) / cap
@@ -148,18 +156,30 @@ def recommend(args) -> None:
             f"Reduce concurrency/window, use smaller aux models, or split:"
         )
     if n_gpu >= 2:
-        aux_dev = n_gpu - 1
-        p_need = p_w + kv_pool + WORKSPACE_GB
-        util_split = min(0.95, (p_w + WORKSPACE_GB + kv_pool) / cap)
-        fits_p = p_need <= cap
-        fits_aux = aux_total <= caps[aux_dev] * 0.95
+        from ftp.config import default_device_layout
+
+        aux_dev, guard_dev = default_device_layout(n_gpu, tp)
+        aux_idx = int(aux_dev.split(":")[1])
+        # Per TP rank: weights and KV shard across the ranks; the workspace doesn't.
+        p_need = (p_w + kv_pool) / tp + WORKSPACE_GB
+        util_split = min(0.95, p_need / cap)
+        co_host = aux_idx < tp  # P spans every GPU: aux shares the last rank's card
+        fits_p = p_need + (aux_total if co_host else 0.0) <= cap
+        fits_aux = co_host or aux_total <= caps[aux_idx] * 0.95
         verdict = "fits" if fits_p and fits_aux else "does NOT fit"
+        p_where = "cuda:0" if tp == 1 else f"cuda:0-{tp - 1} (TP={tp})"
+        per_gpu = " per GPU" if tp > 1 else ""
+        aux_note = " (CO-HOSTED with a P rank)" if co_host else ""
         print(
-            f"SPLIT ({n_gpu} GPUs): {verdict}. P on cuda:0 "
-            f"({p_need:.1f} of {cap:.1f} GB, gpu_memory_utilization={util_split:.2f}), "
-            f"aux pair on cuda:{aux_dev} ({aux_total:.1f} of {caps[aux_dev]:.1f} GB) "
-            f"via DDConfig(aux_device='cuda:{aux_dev}')."
+            f"SPLIT ({n_gpu} GPUs): {verdict}. P on {p_where} "
+            f"({p_need:.1f} of {cap:.1f} GB{per_gpu}, gpu_memory_utilization={util_split:.2f}), "
+            f"aux pair on {aux_dev}{aux_note} ({aux_total:.1f} of {caps[aux_idx]:.1f} GB) "
+            f"via DDConfig(aux_device='{aux_dev}'); degeneration-guard judge (if used) "
+            f"on {guard_dev}."
         )
+        if not fits_p and tp < n_gpu:
+            print(f"  P exceeds its per-GPU share — rerun with --tp {min(tp * 2, n_gpu)} "
+                  f"to model a wider shard.")
     print(
         "\nAlways: prewarm = peak DD concurrency; enable_prefix_caching=False; "
         "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; if vLLM OOMs in "
@@ -223,6 +243,8 @@ def main() -> None:
     ap.add_argument("--concurrency", type=int, default=32, help="peak concurrent DD requests")
     ap.add_argument("--window", type=int, default=1024, help="aux context window")
     ap.add_argument("--max-len", type=int, default=2048, help="P max_model_len")
+    ap.add_argument("--tp", type=int, default=1,
+                    help="model P sharded over this many GPUs (tensor_parallel_size)")
     ap.add_argument("--live-aux", action="store_true", help="measure the aux pair for real")
     recommend(ap.parse_args())
 
