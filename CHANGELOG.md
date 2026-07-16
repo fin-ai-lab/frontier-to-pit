@@ -18,15 +18,23 @@ adheres to [Semantic Versioning](https://semver.org/).
   dropped), so the guard keeps the fusion and repairs the collapse instead:
   a small judge LM (default `Qwen/Qwen3.5-2B`, on the aux GPU) sweeps the batch
   every 25 engine steps — ONE batched yes/no forward regardless of batch width —
-  reading each request's last 50 tokens; on p(degenerated) ≥ 0.9 that request
-  (only) is force-stopped via a reserved marker token, rewound 50 tokens, and
-  resampled. vLLM cannot rewind KV mid-request, so the rewind is a stop+resubmit
+  reading each request's last 50 tokens through a zlib pre-gate (only
+  loop-compressible windows reach the judge — measured on gemma-labeled windows:
+  the gate passes 89% of degenerate and 3% of clean ones); on p(degenerated) ≥
+  0.5 that request (only) is force-stopped via a reserved marker token, rewound
+  50 tokens, and resampled. The gate+threshold pair is CALIBRATED on real labeled
+  windows from the α=1.5 results: TPR 0.80 / FPR 0.02 per check, and a persistent
+  loop is re-checked every sweep so the effective catch rate compounds toward 1.
+  vLLM cannot rewind KV mid-request, so the rewind is a stop+resubmit
   (`ftp.guard.rollback_generate`); the clean path is never interrupted. Stuck
   requests escalate: after 2 no-progress resamples the walk-back deepens by
   another 50 tokens (50 → 100 → 150 …); a request that still breaks at its very
   first tokens returns a visible `[Could not generate without degeneration]`
   instead of garbage, and one that runs out of budget/rounds returns its clean
-  accepted prefix. `run.py` streaming now emits APPROVED blocks: the newest 50
+  accepted prefix (`max_rounds`, default 20, globally caps judge failures per
+  request). The judge loads multimodal-wrapped checkpoints (Qwen3.5-\*) via the
+  architecture the checkpoint declares when the plain-CausalLM auto route
+  rejects the nested config. `run.py` streaming now emits APPROVED blocks: the newest 50
   tokens are held back until they survive the walk-back window, so a rewind
   never has to un-print (the visible stream trails generation by ~1 s).
 

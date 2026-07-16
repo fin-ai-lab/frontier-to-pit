@@ -53,7 +53,13 @@ from vllm.v1.sample.logits_processor.interface import BatchUpdate
 from ftp.config import DDConfig
 from ftp.core import build_special_ids, dd_fuse
 from ftp.engine import AuxBatchedEngine
-from ftp.guard import DegenJudge, GuardConfig, resolve_marker_id, window_ids
+from ftp.guard import (
+    DegenJudge,
+    GuardConfig,
+    resolve_marker_id,
+    window_ids,
+    window_suspicious,
+)
 from ftp.paired import check_fusable
 from ftp.translate import (
     TokenTextTable,
@@ -968,7 +974,8 @@ class GuardLogitsProcessor(AdapterLogitsProcessor):
         print(
             f"[GuardLogitsProcessor] judge={cfg.model} on {self._judge_device} "
             f"interval={cfg.interval} backtrack={cfg.backtrack} "
-            f"threshold={cfg.threshold} marker={cfg.marker!r}(id {self._marker})",
+            f"threshold={cfg.threshold} gate>={cfg.gate_ratio} "
+            f"marker={cfg.marker!r}(id {self._marker})",
             flush=True,
         )
 
@@ -1025,8 +1032,14 @@ class GuardLogitsProcessor(AdapterLogitsProcessor):
                 continue  # paused request — no new tokens since its last check
             ctx.last_checked = n
             ids = window_ids(partial_fn.args[0], output_ids, cfg.backtrack)
+            text = self._tok.decode(ids, skip_special_tokens=False)
+            # zlib pre-gate: only compressible (loop-like) windows reach the judge —
+            # kills most judge false-positives and keeps the sweep nearly free when
+            # the batch is healthy (measured: 3% of clean windows pass the gate).
+            if not window_suspicious(text, cfg.gate_ratio):
+                continue
             due.append((batch_idx, ctx))
-            texts.append(self._tok.decode(ids, skip_special_tokens=False))
+            texts.append(text)
         if texts:
             for (batch_idx, ctx), bad in zip(due, self._judge.tripped(texts), strict=True):
                 if bad:

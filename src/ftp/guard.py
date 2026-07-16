@@ -60,6 +60,7 @@ _ENV_NAMES: dict[str, str] = {
     "tries": "DD_GUARD_TRIES",
     "max_rounds": "DD_GUARD_MAX_ROUNDS",
     "min_tokens": "DD_GUARD_MIN_TOKENS",
+    "gate_ratio": "DD_GUARD_GATE_RATIO",
 }
 
 #: reserved-token candidates for the stop marker, tried in order. Must be a real
@@ -84,18 +85,26 @@ class GuardConfig:
             between sweeps (one token per step).
         backtrack: Tokens shown to the judge per check AND tokens discarded on a
             rewind. The window is the last ``backtrack`` tokens of prompt+output.
-        threshold: Trip when p(degenerated) >= threshold. The single-token yes/no
-            readout has a harsh prior on edge cases (see
-            tools/README_degradation.md), so the default demands high confidence.
+        threshold: Trip when p(degenerated) >= threshold. Calibrated (with
+            ``gate_ratio``) on gemma-labeled degen/clean windows from the real
+            alpha=1.5 results: gate 1.6 + threshold 0.5 measures TPR 0.80 /
+            FPR 0.02 PER CHECK — and because a persistent loop is re-checked
+            every sweep, the effective catch rate compounds toward 1 while a
+            false trip costs only one recoverable rewind.
+        gate_ratio: zlib pre-gate: a window is only shown to the judge when
+            ``len(bytes)/len(zlib(bytes)) >= gate_ratio`` (loops compress;
+            normal prose sits ~0.6-1.2 at window size). Kills most judge
+            false-positives AND ~10x-es down judge load. 0 disables the gate.
         marker: Token string forced on a trip and registered as a stop token.
         dtype: Judge dtype.
         tries: No-progress rescue attempts at one stuck point before the
             walk-back ESCALATES by another ``backtrack`` (50 -> 100 -> 150 ...).
             A request that escalates back to its first tokens and still breaks
             fails visibly (see :func:`rollback_generate`).
-        max_rounds: Total generation rounds per request (backstop against
-            pathological rescue loops) — past it, the clean accepted prefix is
-            returned as-is.
+        max_rounds: GLOBAL cap on generation rounds per request — since each
+            round can trip the judge at most once, this is the "you can only
+            fail the judge N times" bound that makes near-infinite rescue loops
+            impossible. Past it, the clean accepted prefix is returned as-is.
         min_tokens: A row is only judged once it has generated at least this
             many tokens. Guards the early steps: a 2-token output like ``**``
             inside a sweep window is indistinguishable from symbol spam even
@@ -107,12 +116,13 @@ class GuardConfig:
     device: str | None = None
     interval: int = 25
     backtrack: int = 50
-    threshold: float = 0.9
+    threshold: float = 0.5
     marker: str = "<|fim_pad|>"
     dtype: str = "bfloat16"
     tries: int = 2
-    max_rounds: int = 12
+    max_rounds: int = 20
     min_tokens: int = 25
+    gate_ratio: float = 1.6
 
     def __post_init__(self) -> None:
         if self.interval < 1:
@@ -130,6 +140,8 @@ class GuardConfig:
                 "clean check, or the surviving prefix may end in judged-bad tokens")
         if not 0.0 < self.threshold <= 1.0:
             raise ValueError(f"threshold must be in (0, 1], got {self.threshold}")
+        if self.gate_ratio < 0:
+            raise ValueError(f"gate_ratio must be >= 0 (0 disables), got {self.gate_ratio}")
 
     # ── Environment round-trip (mirrors DDConfig) ────────────────────────────
 
@@ -205,23 +217,44 @@ def window_ids(prompt_ids, output_ids, backtrack: int) -> list[int]:
     return out[-backtrack:]
 
 
+def window_suspicious(text: str, gate_ratio: float) -> bool:
+    """zlib pre-gate: is this window compressible enough to be a loop?
+
+    Measured on gemma-labeled 50-token windows from the alpha=1.5 results:
+    ratio >= 1.6 passes 89% of degenerate windows and 3% of clean ones (normal
+    prose sits ~0.6-1.2 at this size; loops 2-15). Windows failing the gate are
+    treated as clean without consulting the judge.
+    """
+    if gate_ratio <= 0:
+        return True
+    import zlib
+
+    b = text.encode("utf-8", "replace")
+    return len(b) / max(len(zlib.compress(b, 6)), 1) >= gate_ratio
+
+
 # The judge prompt. Kept deliberately narrow: the offline destruction judge's failure
 # modes (tools/README_degradation.md) showed that "is this text bad?" flags rambling
 # and hallucination — which are EXPECTED under unlearning. Only mechanical collapse
-# counts. The window is fenced so mid-window role markers can't re-frame the task.
+# counts. Calibrated on gemma-labeled windows (2026-07-16, 100 degen + 100 clean from
+# the alpha=1.5 arm): this few-shot form + threshold 0.5 behind the zlib gate measures
+# TPR 0.80 / FPR 0.02 per check; the zero-shot fenced form scored mushier (nothing
+# tripped above 0.8, 7% FPR at its best threshold).
 _JUDGE_PROMPT = """\
-You are checking a snippet from the MIDDLE of an AI assistant's reply for decoding \
-failure. The snippet starts and ends mid-sentence; that is normal.
+Judge whether TEXT (a snippet from the middle of a longer output; it starts and ends \
+mid-sentence, which is normal) has DEGENERATED into mechanical repetition.
 
-SNIPPET:
-<<<
-{window}
->>>
+Examples:
+TEXT: "the deal; the deal; the deal; the deal; the deal; the deal; the deal" -> yes
+TEXT: "regulators approved the merger in March, and the stock rose 4% on the news" -> no
 
-Degenerated means mechanical collapse: the same word/phrase/symbol repeating over and \
-over, keyboard-mash or non-words, or pure symbol spam. Wrong facts, hallucinations, \
-awkward style, or legitimate lists/code are NOT degeneration. Is the snippet \
-degenerated? Answer yes or no."""
+Degenerated = the same word, phrase, or symbol pattern repeated over and over, or \
+keyboard-mash non-words. Normal prose, lists, tables, code, quotes, or wrong facts \
+are NOT degenerated. If unsure, answer no.
+
+TEXT: "{window}"
+
+Answer yes or no."""
 
 
 class DegenJudge:
@@ -245,9 +278,25 @@ class DegenJudge:
         if self._tok.pad_token_id is None:
             self._tok.pad_token = self._tok.eos_token
         self._tok.padding_side = "left"  # last position = readout position for every row
-        self._model = AutoModelForCausalLM.from_pretrained(
-            cfg.model, torch_dtype=dtype, trust_remote_code=True,
-        ).to(device).eval()
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                cfg.model, dtype=dtype, trust_remote_code=True)
+        except Exception:  # noqa: BLE001 — fall through to the declared architecture
+            # Multimodal-wrapped checkpoints (e.g. Qwen3.5-*: config nests the LM
+            # under text_config, architectures=[Qwen3_5ForConditionalGeneration])
+            # crash the plain-CausalLM auto route ('...Config' object has no
+            # attribute 'vocab_size'). Load the class the checkpoint DECLARES —
+            # text-only forwards work fine; the vision tower just sits unused.
+            import transformers as _tf
+            from transformers import AutoConfig
+
+            arch = (AutoConfig.from_pretrained(cfg.model, trust_remote_code=True)
+                    .architectures or [None])[0]
+            cls = getattr(_tf, arch or "", None)
+            if cls is None:
+                raise
+            model = cls.from_pretrained(cfg.model, dtype=dtype, trust_remote_code=True)
+        self._model = model.to(device).eval()
         self._threshold = cfg.threshold
 
         def first_ids(variants):
@@ -302,7 +351,7 @@ def rollback_generate(
     marker_id: int,
     backtrack: int,
     tries: int = 2,
-    max_rounds: int = 12,
+    max_rounds: int = 20,
     decode,
     use_tqdm: bool = False,
 ):

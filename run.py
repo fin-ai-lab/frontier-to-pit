@@ -146,7 +146,7 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
                     help="judge every N engine steps (one batched check)")
     ap.add_argument("--guard-backtrack", type=int, default=50,
                     help="tokens judged per check AND discarded per rewind")
-    ap.add_argument("--guard-threshold", type=float, default=0.9,
+    ap.add_argument("--guard-threshold", type=float, default=0.5,
                     help="trip when p(degenerated) >= this")
     ap.add_argument("--guard-tries", type=int, default=2,
                     help="stuck-point resamples before the walk-back deepens by "
