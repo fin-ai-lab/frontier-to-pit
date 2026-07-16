@@ -792,11 +792,20 @@ class DDVLLM(VLLM):
             from ftp.guard import GuardConfig
 
             gk = dict(dd_guard_kwargs or {})
-            # aux_device may be the per-model "p_dev,q_dev" pair form; the judge
-            # needs ONE device — default to aux_q's card.
-            from ftp.config import split_aux_device
+            # Judge placement: mirror the engine's default layout — first free GPU
+            # after P's TP ranks and the aux devices (aux_device may be the
+            # per-model "p_dev,q_dev" pair form), else the last TP rank's spare
+            # memory, else the aux GPU. 2xGPU TP=1 with aux_device="cuda:1"
+            # resolves to cuda:1 exactly as before; 4xGPU TP=2 with the pair
+            # split over cuda:2/cuda:3 puts the judge on cuda:1.
+            if "device" not in gk:
+                import torch
 
-            gk.setdefault("device", split_aux_device(aux_device)[1])
+                from ftp.config import default_device_layout
+
+                n = torch.cuda.device_count() if torch.cuda.is_available() else 0
+                tp = int(kwargs.get("tensor_parallel_size") or 1)
+                gk["device"] = default_device_layout(n, tp, aux_device=aux_device)[1]
             self._guard = GuardConfig(**gk)
             from ftp.vllm import GuardLogitsProcessor
 

@@ -853,6 +853,10 @@ def main() -> None:
     ap.add_argument("--gpu-memory-utilization", type=float, default=None,
                     dest="gpu_memory_utilization")
     ap.add_argument("--max-model-len", type=int, default=None, dest="max_model_len")
+    ap.add_argument("--aux-device", default=None, dest="aux_device",
+                    help="DD backend only: device(s) for the aux models — one GPU for both "
+                         "(e.g. cuda:1) or an 'aux_p_dev,aux_q_dev' pair (e.g. cuda:3,cuda:2) "
+                         "for one engine per card (4xGPU TP=2 layout). Overrides the spec.")
     args = ap.parse_args()
 
     spec = MODELS[args.model]
@@ -869,7 +873,8 @@ def main() -> None:
           flush=True)
 
     overrides = {k: getattr(args, k) for k in
-                 ("batch_size", "tensor_parallel_size", "gpu_memory_utilization", "max_model_len")}
+                 ("batch_size", "tensor_parallel_size", "gpu_memory_utilization",
+                  "max_model_len", "aux_device")}
     inst = build_model(spec, overrides)
     tm = TaskManager(include_path=TEMPORAL_DIR)
 
