@@ -161,7 +161,7 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
                     help="GPU for the guard judge (default: first free GPU after P's TP ranks "
                          "and the aux models; else under TP the last TP rank's spare memory — "
                          "cuda:1 on 4xGPU TP=2, where the judge loads post-profiling, so leave "
-                         "it ~5GB under --gpu-memory-utilization — else the aux GPU, as on "
+                         "it ~8GB under --gpu-memory-utilization — else the aux GPU, as on "
                          "2xGPU)")
     ap.add_argument("--guard-interval", type=int, default=25,
                     help="judge every N engine steps (one batched check)")

@@ -266,7 +266,7 @@ def default_device_layout(
     the most headroom). The guard judge takes the first free GPU no aux model
     claimed; failing that, under TP it rides the LAST TP rank's spare memory
     (sharded P leaves headroom — vLLM is blind to a post-profiling tenant, so
-    keep ``gpu_memory_utilization`` low enough to leave the judge ~5 GB), and
+    keep ``gpu_memory_utilization`` low enough to leave the judge ~8 GB), and
     with TP=1 it shares an aux card. Explicit ``aux_device`` (single or pair
     form) / ``guard_device`` values pass through untouched; the guard default
     routes around explicit aux GPUs.

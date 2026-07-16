@@ -50,7 +50,7 @@ adheres to [Semantic Versioning](https://semver.org/).
   card if any remain, else rides the LAST TP rank's spare memory (sharded P
   leaves headroom); like the DD aux engines, under TP the judge now loads at
   its first sweep — post-profiling, where an external allocation on a TP
-  rank's card would crash the worker — so leave it ~5 GB of
+  rank's card would crash the worker — so leave it ~8 GB of
   `gpu_memory_utilization` headroom. Layouts: 2×GPU TP=1 unchanged
   (P | aux pair+guard on `cuda:1`); 4×GPU TP=2: P over `cuda:0`–`1` + guard on
   `cuda:1`, retain aux on `cuda:2`, forget aux on `cuda:3`. Motivation:
