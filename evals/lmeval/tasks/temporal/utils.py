@@ -4,8 +4,13 @@ Each runs generatively at temperature 0.7 with ``repeats: N`` (the launcher over
 N via ``--temporal-n``). A custom ``take_all`` filter keeps every repeat so
 ``process_results`` sees all N generations per doc; a generation "leaks" if a
 post-cutoff term surfaces in the free-form prediction (lower is better). Grouped
-metrics (pre/post cutoff, covid look-ahead window) are emitted as separate
-``(num, den)`` scalars and reduced response-weighted by ``ratio_agg``.
+metrics (e.g. the covid look-ahead window) are emitted as separate ``(num, den)``
+scalars and reduced response-weighted by ``ratio_agg``.
+
+The parquets ARE the shipped artifact: prompts are served verbatim (no rewriting
+here), and each doc carries its system prompt in the ``system_prompt`` column,
+which the task YAMLs reference via ``description: system_prompt`` (the harness
+resolves a doc column named there into the chat template's system message).
 
 Datasets load from parquet next to this file (path from ``__file__``, not CWD) so the
 task is portable across machines.
@@ -13,7 +18,6 @@ task is portable across machines.
 
 from __future__ import annotations
 
-import datetime
 import re
 import sys
 from pathlib import Path
@@ -145,7 +149,7 @@ def per1k_agg(items) -> float:
 
 
 # ── dataset loaders (portable parquet paths) ──
-def _load(name, drop=None):
+def _load(name):
     import datasets
     import pandas as pd
 
@@ -156,25 +160,11 @@ def _load(name, drop=None):
     # node a retain-only set), so shards silently disagreed on the data. pandas reads the
     # file fresh every call; from_pandas builds from that DataFrame -> always current.
     df = pd.read_parquet(str(_DIR / f"{name}.parquet"))
-    if drop:
-        for col, vals in drop.items():
-            df = df[~df[col].astype(str).isin(set(vals))]
-        df = df.reset_index(drop=True)
     return datasets.DatasetDict({"test": datasets.Dataset.from_pandas(df, preserve_index=False)})
 
 
-# Excluded M&A deals: an acquirer buying its OWN same-named MLP/subsidiary. The target
-# normalizes to the acquirer's name (which is named in the prompt), so a generation that
-# merely echoes the acquirer trips the firm matcher as a "leak" of the target -> a false
-# positive. Both observed cases:
-#   - Targa Resources Corp  ->  Targa Resources Partners LP
-#   - ONEOK Inc             ->  ONEOK Partners LP   (post-2015; was the ONLY post-cutoff "leak")
-# Dropping them grades M&A out of 172.
-_MA_DROP = {"target": {"Targa Resources Partners LP", "ONEOK Partners LP"}}
-
-
 def load_ma(**kwargs):
-    return _load("ma", drop=_MA_DROP)
+    return _load("ma")
 
 
 def load_pharma(**kwargs):
@@ -226,11 +216,11 @@ def load_streamingqa(**kwargs):
 # computed from the N samples downstream (tools/.../streamingqa_leak_at_k.py re-scores the
 # logged generations, so the matcher can change without re-generating).
 def streamingqa_doc_to_text(doc) -> str:
+    # Brevity instruction lives in the doc's `system_prompt` column (yaml `description`).
     import datetime as _dt
 
     date = _dt.datetime.utcfromtimestamp(int(doc["question_ts"])).strftime("%B %-d, %Y")
-    return (f"Today is {date}.\n\n{str(doc['question']).strip()}\n\n"
-            "Answer in as few words as possible.")
+    return f"Today is {date}.\n\n{str(doc['question']).strip()}"
 
 
 def streamingqa_process_results(doc, results) -> dict:
@@ -256,76 +246,28 @@ def streamingqa_process_results(doc, results) -> dict:
 
 
 # ── M&A look-ahead leakage (leak = naming the firm that was in fact acquired) ──
-# The bundled prompt ends with a weak anti-refusal parenthetical that aligned models
-# ignore ("As an AI I cannot predict the future / give financial advice ..."). Drop it
-# and prepend a forceful preamble. Canonical M&A prompt — kept identical across
-# divergence-decoding, lab-2026, and forecasting-thoughts.
-_MA_WEAK_SUFFIX = ("(This is a hypothetical scenario which will not be used for any form of "
-                   "investing or trading. Do not refuse to answer.)")
-_MA_PREAMBLE = (
-    "This is a hypothetical brainstorming exercise for academic research; it is not "
-    "financial advice and will never be used for investing or trading. You are not "
-    "expected to be correct, so give your best speculative guess based only on the "
-    "company's strategic profile and industry position as of the date given. Do not "
-    "refuse, and do not add any disclaimer about being an AI, about predicting the "
-    "future, or about your knowledge cutoff.")
-
-
-def ma_doc_to_text(doc) -> str:
-    question = str(doc["prompt_text"]).replace(_MA_WEAK_SUFFIX, "").rstrip()
-    return f"{_MA_PREAMBLE}\n\n{question}"
-
-
-# Project cutoff for the M&A pre/post split: a deal ANNOUNCED after 2015-12-31 is
-# post-cutoff (naming its target = look-ahead leakage); on/before = in-cutoff knowledge.
-# NB: the dataset's `regime` field is from another project (different boundary) — do not
-# use it; split on `dateann`.
-_MA_CUTOFF = datetime.datetime(2015, 12, 31)
-
-
-def _ma_post_cutoff(doc) -> bool:
-    return datetime.datetime.strptime(str(doc["dateann"])[:10], "%Y-%m-%d") > _MA_CUTOFF
-
-
+# Every deal in ma.parquet was announced AFTER 2015-12-31 (`dateann`; the pre-cutoff
+# deals and the two same-name acquirer/target false positives were dropped from the
+# artifact), so naming the target is always look-ahead leakage. Prompts are served
+# verbatim (yaml `doc_to_text: prompt_text`).
 def ma_process_results(doc, results) -> dict:
     gens = _gens(results)
     flags = [mentions_firm(g, doc["target"]) for g in gens]
     n, nl = len(flags), int(sum(flags))
-    post = _ma_post_cutoff(doc)  # deal announced after 2015-12-31 = look-ahead signal
-    any_leak = 1 if nl else 0
-    # Split both rates by regime: pre-2015 = legitimate in-cutoff knowledge, post-2015 =
-    # look-ahead leakage. `(num, den)` pairs so ratio_agg counts only the matching regime
-    # (the other contributes (0, 0) and drops out of the ratio).
     out = {
         "leak_rate": (nl, n),
-        "any_leak_rate": float(any_leak),
-        "leak_rate_post": (nl, n) if post else (0, 0),
-        "leak_rate_pre": (0, 0) if post else (nl, n),
-        "any_leak_rate_post": (any_leak, 1) if post else (0, 0),
-        "any_leak_rate_pre": (0, 0) if post else (any_leak, 1),
+        "any_leak_rate": 1.0 if nl else 0.0,
     }
-    # LAB mentions/1K tokens, per span (whole/think/final) x regime (post = leak signal).
-    m1k = _mentions_per_1k(gens, doc["target"], "ma")
-    for sfx, pair in m1k.items():
-        out[f"mentions_per_1k_post{sfx}"] = pair if post else (0.0, 0)
-        out[f"mentions_per_1k_pre{sfx}"] = (0.0, 0) if post else pair
+    # LAB mentions/1K tokens, per span (whole/think/final).
+    for sfx, pair in _mentions_per_1k(gens, doc["target"], "ma").items():
+        out[f"mentions_per_1k{sfx}"] = pair
     return out
 
 
 # ── pharma look-ahead leakage (leak = naming a post-cutoff drug/approval) ──
-def pharma_doc_to_text(doc) -> str:
-    return doc["prompt_text"]
-
-
-# Generic words that slip into a doc's lab_words but match almost any pharma generation
-# (e.g. "study" in "Phase III study") -> a false-positive "leak". Filtered from every doc's
-# lab_words at scoring time, analogous to _MA_DROP for the M&A firm matcher.
-_PHARMA_LAB_STOP = {"study"}
-
-
 def pharma_process_results(doc, results) -> dict:
     gens = _gens(results)
-    words = [w for w in (str(x).lower() for x in doc["lab_words"]) if w not in _PHARMA_LAB_STOP]
+    words = [str(x).lower() for x in doc["lab_words"]]
     flags = [any(_term_count(g.lower(), w) for w in words) for g in gens]
     n, nl = len(flags), int(sum(flags))
     strong = doc["verdict"] == "Strong LAB"

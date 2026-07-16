@@ -95,7 +95,12 @@ def gpu_batch_size(default: int = _DEFAULT_HF_BATCH) -> int:
 # the one that gets compared, degenerate or not. That it degenerates under BOTH formats is
 # the audit's own finding, not ours.
 PIT_CHAT_TEMPLATE = (
-    "{% for m in messages %}{% if m['role'] == 'user' %}"
+    # Alpaca has no system slot: a system message (the temporal tasks' per-doc
+    # system_prompt) renders as a preamble paragraph before the instruction block.
+    # No-system prompts (all utility tasks) are byte-identical to the pre-system template.
+    "{% for m in messages %}{% if m['role'] == 'system' %}"
+    "{{ m['content'] }}\n\n"
+    "{% elif m['role'] == 'user' %}"
     "### Instruction:\n{{ m['content'] }}\n\n### Response:\n"
     "{% elif m['role'] == 'assistant' %}{{ m['content'] }}"  # gen_prefix (e.g. humaneval)
     "{% endif %}{% endfor %}"
@@ -279,7 +284,11 @@ class PITHFLM(HFLM):
 # PIT repo's own IFEval script uses); this runs the documented format alongside it so the
 # two are directly comparable rather than one replacing the other.
 PIT_CARD_CHAT_TEMPLATE = (
-    "{% for m in messages %}{% if m['role'] == 'user' %}"
+    # The card format has no system slot either: render a system message (temporal
+    # tasks' per-doc system_prompt) as a leading paragraph before the first role marker.
+    "{% for m in messages %}{% if m['role'] == 'system' %}"
+    "{{ m['content'] }}\n\n"
+    "{% elif m['role'] == 'user' %}"
     "<|user|>\n{{ m['content'] }}\n<|assistant|>\n"
     "{% elif m['role'] == 'assistant' %}{{ m['content'] }}"  # gen_prefix (e.g. humaneval)
     "{% endif %}{% endfor %}"

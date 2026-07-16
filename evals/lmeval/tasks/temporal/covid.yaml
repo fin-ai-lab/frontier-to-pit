@@ -3,6 +3,8 @@ custom_dataset: !function utils.load_covid
 test_split: test
 output_type: generate_until
 doc_to_text: !function utils.covid_doc_to_text
+# `description` names the doc column rendered as the system message.
+description: system_prompt
 doc_to_target: ""
 process_results: !function utils.covid_process_results
 num_fewshot: 0
@@ -65,4 +67,4 @@ metric_list:
     aggregation: !function utils.per1k_agg
     higher_is_better: false
 metadata:
-  version: 2
+  version: 3

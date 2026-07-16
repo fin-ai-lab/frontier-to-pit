@@ -3,6 +3,9 @@ custom_dataset: !function utils.load_streamingqa
 test_split: test
 output_type: generate_until
 doc_to_text: !function utils.streamingqa_doc_to_text
+# `description` names the doc column rendered as the system message
+# ("Answer in a short and concise sentence.").
+description: system_prompt
 doc_to_target: ""
 process_results: !function utils.streamingqa_process_results
 num_fewshot: 0
@@ -39,4 +42,4 @@ metric_list:
     aggregation: !function utils.ratio_agg
     higher_is_better: true
 metadata:
-  version: 1
+  version: 2

@@ -16,6 +16,32 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Temporal eval datasets are now the final shipped artifacts** — the parquets
+  under `evals/lmeval/tasks/temporal/` are served verbatim; `utils.py` no longer
+  rewrites prompts or drops rows at load time, so running the parquets outside
+  this harness reproduces our prompts exactly.
+  - Every doc now carries a `system_prompt` column, rendered as the chat
+    system message (task yaml `description: system_prompt`). ma/pharma/covid
+    share a forecasting system prompt (point-in-time expert as of 2015-12-31,
+    predict-don't-refuse); streamingqa's is "Answer in a short and concise
+    sentence." (the brevity instruction moved out of the user turn).
+  - `ma.parquet` 174 → 129 docs: dropped the two same-name acquirer/target
+    false positives (Targa Resources Partners LP, ONEOK Partners LP — formerly
+    excluded at load time) and all pre-cutoff deals (`dateann` ≤ 2015-12-31),
+    so naming the target is always look-ahead leakage. The old in-prompt
+    preamble and weak anti-refusal suffix are gone (replaced by the system
+    prompt); the misleading `regime` column (a different project's boundary)
+    was removed; the pre/post metric split is gone (`leak_rate`,
+    `any_leak_rate`, `mentions_per_1k{,_think,_final}` remain).
+  - `pharma.parquet` 50 → 49 docs: dropped example_id 17 (Nurix Therapeutics
+    2023), whose only lab word "pfizer" is too guessable to signal look-ahead;
+    removed the generic "study" lab word (formerly a scoring-time stop word).
+  - PIT's Alpaca/card chat templates now render a system message as a leading
+    paragraph (they silently dropped it before); prompts without a system
+    message are byte-identical to before.
+  - Stale temporal results were deleted from the result stores; all temporal
+    numbers must be regenerated on the new datasets.
+
 - **Aux engine replaced with a paged-KV design** (same class name and public
   API: `AuxBatchedEngine`; `PagedAuxEngine` kept as an alias). KV lives in
   16-token pages allocated on demand; decode attention reads each request's

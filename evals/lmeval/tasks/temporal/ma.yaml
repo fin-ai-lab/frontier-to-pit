@@ -2,7 +2,10 @@ task: ma
 custom_dataset: !function utils.load_ma
 test_split: test
 output_type: generate_until
-doc_to_text: !function utils.ma_doc_to_text
+# The parquet is the artifact: the prompt is served verbatim from `prompt_text`,
+# and `description` names the doc column rendered as the system message.
+doc_to_text: prompt_text
+description: system_prompt
 doc_to_target: ""
 process_results: !function utils.ma_process_results
 num_fewshot: 0
@@ -26,35 +29,14 @@ metric_list:
   - metric: any_leak_rate
     aggregation: mean
     higher_is_better: false
-  - metric: leak_rate_post
-    aggregation: !function utils.ratio_agg
-    higher_is_better: false
-  - metric: leak_rate_pre
-    aggregation: !function utils.ratio_agg
-    higher_is_better: false
-  - metric: any_leak_rate_post
-    aggregation: !function utils.ratio_agg
-    higher_is_better: false
-  - metric: any_leak_rate_pre
-    aggregation: !function utils.ratio_agg
-    higher_is_better: false
-  - metric: mentions_per_1k_post
+  - metric: mentions_per_1k
     aggregation: !function utils.per1k_agg
     higher_is_better: false
-  - metric: mentions_per_1k_post_think
+  - metric: mentions_per_1k_think
     aggregation: !function utils.per1k_agg
     higher_is_better: false
-  - metric: mentions_per_1k_post_final
+  - metric: mentions_per_1k_final
     aggregation: !function utils.per1k_agg
     higher_is_better: false
-  - metric: mentions_per_1k_pre
-    aggregation: !function utils.per1k_agg
-    higher_is_better: true
-  - metric: mentions_per_1k_pre_think
-    aggregation: !function utils.per1k_agg
-    higher_is_better: true
-  - metric: mentions_per_1k_pre_final
-    aggregation: !function utils.per1k_agg
-    higher_is_better: true
 metadata:
-  version: 3
+  version: 4

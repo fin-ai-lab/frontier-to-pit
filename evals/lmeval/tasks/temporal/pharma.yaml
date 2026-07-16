@@ -2,7 +2,10 @@ task: pharma
 custom_dataset: !function utils.load_pharma
 test_split: test
 output_type: generate_until
-doc_to_text: !function utils.pharma_doc_to_text
+# The parquet is the artifact: the prompt is served verbatim from `prompt_text`,
+# and `description` names the doc column rendered as the system message.
+doc_to_text: prompt_text
+description: system_prompt
 doc_to_target: ""
 process_results: !function utils.pharma_process_results
 num_fewshot: 0
@@ -42,4 +45,4 @@ metric_list:
     aggregation: !function utils.per1k_agg
     higher_is_better: false
 metadata:
-  version: 1
+  version: 2
