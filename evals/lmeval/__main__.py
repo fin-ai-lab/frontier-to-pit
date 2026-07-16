@@ -364,6 +364,31 @@ MODELS["v6_partialsft_2015_temp0"] = {
     "util_max_gen_toks": 16384,
 }
 
+# PIT-4B-FT-201511 prompted the way its own model card documents (<|user|>/<|assistant|>
+# role markers, stop on <|end|>) rather than the Alpaca format the PIT repo's IFEval script
+# uses. `pit_4b_2015` (Alpaca + greedy) produced every published PIT number and stays exactly
+# as-is; these are DISTINCT model keys, so `results/<task>/pit_4b_2015__base.json` is never
+# touched and the two can be compared side by side.
+#
+# Two arms, because format and decoding are separate variables and the existing results are
+# greedy:
+#   _chat        = card format + the card's recommended sampling (T=0.7, top_p=0.9) — this
+#                  is "we ran it exactly as documented".
+#   _chat_greedy = card format + greedy — decoding-matched to `pit_4b_2015`, so the diff
+#                  isolates the prompt format alone. Greedy is HF's default, hence no
+#                  gen_kwargs (mirrors how `pit_4b_2015` gets greedy).
+# Same weights/context/budget as `pit_4b_2015` so nothing else moves.
+_PIT_2015_ARGS = {"pretrained": "Diamegs/PIT-4B-FT-201511", "max_length": 2048}
+MODELS["pit_4b_2015_chat"] = {
+    "backend": "pit_chat", "args": dict(_PIT_2015_ARGS),
+    "gen_kwargs": {"do_sample": True, "temperature": 0.7, "top_p": 0.9},
+    "util_max_gen_toks": 1536,
+}
+MODELS["pit_4b_2015_chat_greedy"] = {
+    "backend": "pit_chat", "args": dict(_PIT_2015_ARGS),
+    "util_max_gen_toks": 1536,
+}
+
 # Production "Ours" eval config (kept standalone after the v6 steering grid was pruned):
 # alpha=1.5, single feature L48:28961@10 (L27 off), rank OFF, NOTHINK, partialsft aux —
 # the recipe run.py serves. Lets the full eval suite still be reproduced for the shipped

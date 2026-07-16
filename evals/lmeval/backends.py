@@ -227,6 +227,54 @@ class PITHFLM(HFLM):
         self.tokenizer.chat_template = PIT_CHAT_TEMPLATE
 
 
+# PIT-4B-FT's own model card documents this format instead of the Alpaca one above:
+#
+#     def format_prompt(instruction): return f"<|user|>\n{instruction}\n<|assistant|>\n"
+#
+# with generation stopped at <|end|> and sampled at T=0.7 / top_p=0.9. `pit_4b_2015` keeps
+# the Alpaca format (that is what the published numbers were produced with, and what the
+# PIT repo's own IFEval script uses); this runs the documented format alongside it so the
+# two are directly comparable rather than one replacing the other.
+PIT_CARD_CHAT_TEMPLATE = (
+    "{% for m in messages %}{% if m['role'] == 'user' %}"
+    "<|user|>\n{{ m['content'] }}\n<|assistant|>\n"
+    "{% elif m['role'] == 'assistant' %}{{ m['content'] }}"  # gen_prefix (e.g. humaneval)
+    "{% endif %}{% endfor %}"
+)
+PIT_END = "<|end|>"
+
+
+@register_model("pit_chat")
+class PITCardHFLM(PITHFLM):
+    """PIT-4B-FT prompted as its model card documents: role markers + <|end|> stop.
+
+    Identical weights, KV patch and batch handling to :class:`PITHFLM` -- the prompt
+    format and the stop string are the only differences, so a diff against the ``pit``
+    results isolates the format.
+    """
+
+    def __init__(self, pretrained, **kwargs):
+        super().__init__(pretrained=pretrained, **kwargs)
+        self.tokenizer.chat_template = PIT_CARD_CHAT_TEMPLATE  # replaces PITHFLM's Alpaca
+
+    def generate_until(self, requests, disable_tqdm: bool = False):
+        # Append <|end|> to each request's stop strings rather than passing `until` through
+        # the spec's gen_kwargs: lm-eval merges gen_kwargs into the task config with a dict
+        # update, so an `until` there would REPLACE each task's own stop strings and break
+        # its answer extraction. <|end|> is ordinary GPT-2 text under this tokenizer, not an
+        # atomic special token, so a stop string is the only way to honour it.
+        for req in requests:
+            kwargs = req.args[1]
+            if not isinstance(kwargs, dict):
+                continue
+            until = kwargs.get("until") or []
+            if isinstance(until, str):
+                until = [until]
+            if PIT_END not in until:
+                kwargs["until"] = [*until, PIT_END]
+        return super().generate_until(requests, disable_tqdm=disable_tqdm)
+
+
 @register_model("timagpt2")
 class TiMaGPT2LM(HFLM):
     """Ti-Ma/TiMaGPT2-* temporal GPT-2 baselines (point-in-time knowledge cutoff).
