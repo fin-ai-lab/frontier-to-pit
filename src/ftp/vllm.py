@@ -50,7 +50,7 @@ from vllm import SamplingParams
 from vllm.v1.sample.logits_processor import AdapterLogitsProcessor
 from vllm.v1.sample.logits_processor.interface import BatchUpdate
 
-from ftp.config import DDConfig, default_device_layout
+from ftp.config import DDConfig, default_device_layout, split_aux_device
 from ftp.core import build_special_ids, dd_fuse
 from ftp.engine import AuxBatchedEngine
 from ftp.guard import (
@@ -338,19 +338,43 @@ class DDLogitsProcessor(AdapterLogitsProcessor):
     def _build_engines(self) -> None:
         cfg = self._cfg
         device, dtype = self._device, self._dtype
-        aux_device = torch.device(cfg.aux_device) if cfg.aux_device else device
-        if aux_device != device:
+        p_dev, q_dev = split_aux_device(cfg.aux_device)
+        aux_p_device = torch.device(p_dev) if p_dev else device
+        aux_q_device = torch.device(q_dev) if q_dev else device
+        split = aux_p_device != aux_q_device
+        if split:
             print(
-                f"[DDLogitsProcessor] aux engines on {aux_device} (P samples on {device})",
+                f"[DDLogitsProcessor] aux engines split: aux_p (forget) on "
+                f"{aux_p_device}, aux_q (retain) on {aux_q_device} "
+                f"(P samples on {device})",
                 flush=True,
             )
-        self._aux_device = aux_device
+        elif aux_p_device != device:
+            print(
+                f"[DDLogitsProcessor] aux engines on {aux_p_device} (P samples on {device})",
+                flush=True,
+            )
+        self._aux_device = aux_p_device  # primary aux device (== q's unless split)
 
         # Fuse resolution: stack the two aux models into ONE forward when
         # their architectures are identical (cfg.fuse_aux: auto|on|off). The
         # two-engine path stays as the reference implementation and the route
-        # for heterogeneous pairs (different sizes, tied embeddings).
+        # for heterogeneous pairs (different sizes, tied embeddings). Per-model
+        # devices force it too: a fused pair is one stacked forward on one GPU.
         fuse = cfg.fuse_aux
+        if split:
+            if fuse == "on":
+                raise ValueError(
+                    f"fuse_aux='on' is incompatible with per-model aux devices "
+                    f"(aux_device={cfg.aux_device!r}): a fused pair is one "
+                    f"stacked forward on one GPU")
+            if fuse == "auto":
+                print(
+                    "[DDLogitsProcessor] aux devices differ: two-engine path "
+                    "(fusion needs one GPU)",
+                    flush=True,
+                )
+            fuse = "off"
         if fuse != "off":
             ok, why = check_fusable(
                 AutoConfig.from_pretrained(cfg.aux_p, trust_remote_code=True),
@@ -372,19 +396,19 @@ class DDLogitsProcessor(AdapterLogitsProcessor):
                 flush=True,
             )
             self._aux = AuxBatchedEngine(
-                cfg.aux_p, aux_device, dtype, cfg.window, cfg.compile_aux, model2=cfg.aux_q,
+                cfg.aux_p, aux_p_device, dtype, cfg.window, cfg.compile_aux, model2=cfg.aux_q,
                 pool_gb=cfg.aux_kv_gb or None,
             )
             self._aux_engines: tuple[AuxBatchedEngine, ...] = (self._aux,)
         else:
             print(f"[DDLogitsProcessor] loading aux_p from {cfg.aux_p}", flush=True)
             self._aux_p = AuxBatchedEngine(
-                cfg.aux_p, aux_device, dtype, cfg.window, cfg.compile_aux,
+                cfg.aux_p, aux_p_device, dtype, cfg.window, cfg.compile_aux,
                 pool_gb=(cfg.aux_kv_gb / 2) or None,
             )
             print(f"[DDLogitsProcessor] loading aux_q from {cfg.aux_q}", flush=True)
             self._aux_q = AuxBatchedEngine(
-                cfg.aux_q, aux_device, dtype, cfg.window, cfg.compile_aux,
+                cfg.aux_q, aux_q_device, dtype, cfg.window, cfg.compile_aux,
                 pool_gb=(cfg.aux_kv_gb / 2) or None,
             )
             self._aux_engines = (self._aux_p, self._aux_q)
@@ -400,26 +424,32 @@ class DDLogitsProcessor(AdapterLogitsProcessor):
         # aux outputs under sustained load (degenerate sampling + retokenizer
         # re-prime storms); needs a race investigation before it ships on.
         # Quarantined to the two-engine path: a fused engine is one forward,
-        # there is nothing to overlap.
+        # there is nothing to overlap. Split devices don't need it either —
+        # two GPUs' default streams already run concurrently.
         self._aux_streams: tuple | None = None
         if (
-            aux_device.type == "cuda"
+            aux_p_device.type == "cuda"
             and os.environ.get("DD_AUX_STREAMS", "0") == "1"
             and not self._fused
+            and not split
         ):
             self._aux_streams = (
-                torch.cuda.Stream(device=aux_device),
-                torch.cuda.Stream(device=aux_device),
+                torch.cuda.Stream(device=aux_p_device),
+                torch.cuda.Stream(device=aux_p_device),
             )
-        elif os.environ.get("DD_AUX_STREAMS", "0") == "1" and self._fused:
-            print("[DDLogitsProcessor] DD_AUX_STREAMS ignored: aux pair is fused", flush=True)
-        # Overlap mode: with the aux pair on its OWN GPU, the aux block for
-        # step t is enqueued at update_state — before vLLM launches P's
-        # forward — so both devices compute concurrently and apply() only
+        elif os.environ.get("DD_AUX_STREAMS", "0") == "1" and (self._fused or split):
+            why = "aux pair is fused" if self._fused else "aux devices already differ"
+            print(f"[DDLogitsProcessor] DD_AUX_STREAMS ignored: {why}", flush=True)
+        # Overlap mode: with the aux models on their OWN GPU(s), the aux block
+        # for step t is enqueued at update_state — before vLLM launches P's
+        # forward — so the devices compute concurrently and apply() only
         # waits out whatever the P forward didn't already hide. Falls back to
         # the serial path on any step where last-step tokens aren't host-
         # visible yet (vLLM async scheduling). DD_OVERLAP=0 disables.
-        self._overlap = aux_device != device and os.environ.get("DD_OVERLAP", "1") == "1"
+        self._overlap = (
+            (aux_p_device != device or aux_q_device != device)
+            and os.environ.get("DD_OVERLAP", "1") == "1"
+        )
         self._prefetch: tuple | None = None
         self._pf_hits = 0
         self._pf_misses = 0
@@ -452,6 +482,11 @@ class DDLogitsProcessor(AdapterLogitsProcessor):
         print(f"[DDLogitsProcessor] tokenizer mode: {mode}", flush=True)
 
         if mode == "universal":
+            if split:
+                raise ValueError(
+                    "per-model aux devices (aux_device='p_dev,q_dev') are supported "
+                    "in shared tokenizer mode only — the universal bridge drives "
+                    "both engines on one device")
             tok = tok_P
             table = TokenTextTable(tok_P)
             cache_dir = (
@@ -776,8 +811,10 @@ class DDLogitsProcessor(AdapterLogitsProcessor):
                     lp2, lq2 = self._run_aux([(id(o), p, o) for _, p, o, _ in late])
                     l_p = torch.cat([l_p, lp2])
                     l_q = torch.cat([l_q, lq2])
+                # split aux devices: each plane crosses to P's GPU independently
                 if l_p.device != logits.device:
                     l_p = l_p.to(logits.device)
+                if l_q.device != logits.device:
                     l_q = l_q.to(logits.device)
             else:
                 if late:
@@ -795,6 +832,7 @@ class DDLogitsProcessor(AdapterLogitsProcessor):
                     tm.stop("aux")
                 if l_p.device != logits.device:  # aux_device: to P's GPU
                     l_p = l_p.to(logits.device)
+                if l_q.device != logits.device:  # may differ from l_p's when split
                     l_q = l_q.to(logits.device)
             else:
                 if tm:
@@ -966,10 +1004,11 @@ class GuardLogitsProcessor(AdapterLogitsProcessor):
         self._eos = self._tok.eos_token_id
 
         # Judge placement: explicit cfg.device, else the default layout — the
-        # first free GPU after P's TP ranks and the aux pair (DD_AUX_DEVICE),
-        # collapsing onto the aux GPU when there is none (2xGPU: judge next to
-        # the aux pair on cuda:1; 4xGPU TP=2: judge alone on cuda:3) — else
-        # P's own device on a single-GPU box.
+        # first free GPU after P's TP ranks and the aux devices (DD_AUX_DEVICE,
+        # single or pair form); failing that, under TP the last TP rank's spare
+        # memory, else the aux GPU (2xGPU: judge next to the aux pair on cuda:1;
+        # 4xGPU TP=2 with the aux pair split over cuda:2/cuda:3: judge on
+        # cuda:1) — else P's own device on a single-GPU box.
         dev: str | torch.device | None = cfg.device
         if dev is None:
             n = torch.cuda.device_count() if torch.cuda.is_available() else 0
@@ -978,7 +1017,23 @@ class GuardLogitsProcessor(AdapterLogitsProcessor):
             )
             dev = dev or device
         self._judge_device = torch.device(dev)
-        self._judge = DegenJudge(cfg, self._judge_device)
+        # Same rationale as the DD aux deferral above: an external allocation
+        # resident on a TP rank's card during vLLM's memory profiling
+        # reproducibly killed the co-hosting worker, and the default layout can
+        # put the judge on the last TP rank (riding sharded P's spare memory).
+        # Under TP the judge loads at its first sweep instead — post-profiling,
+        # post-capture; vLLM is blind to it then, so gpu_memory_utilization must
+        # leave it ~5 GB. TP=1 keeps the eager load (before profiling = its
+        # footprint is accounted automatically).
+        self._judge: DegenJudge | None = None
+        if tp_world > 1:
+            print(
+                "[GuardLogitsProcessor] TP detected: deferring judge load to "
+                "the first sweep (post-profiling)",
+                flush=True,
+            )
+        else:
+            self._judge = DegenJudge(cfg, self._judge_device)
         self._steps = 0
         print(
             f"[GuardLogitsProcessor] judge={cfg.model} on {self._judge_device} "
@@ -1050,6 +1105,13 @@ class GuardLogitsProcessor(AdapterLogitsProcessor):
             due.append((batch_idx, ctx))
             texts.append(text)
         if texts:
+            if self._judge is None:  # deferred past TP profiling — one-time load
+                print(
+                    f"[GuardLogitsProcessor] loading judge {cfg.model} on "
+                    f"{self._judge_device} (deferred under TP)",
+                    flush=True,
+                )
+                self._judge = DegenJudge(cfg, self._judge_device)
             for (batch_idx, ctx), bad in zip(due, self._judge.tripped(texts), strict=True):
                 if bad:
                     ctx.tripped = 2

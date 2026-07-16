@@ -77,10 +77,12 @@ class GuardConfig:
             default matches the benchmarked family so its tokenizer agrees with P).
         device: Device for the judge (e.g. ``"cuda:1"``). ``None`` = the default
             layout (:func:`ftp.config.default_device_layout`): the first free GPU
-            after P's tensor-parallel ranks and the DD aux device, collapsing onto
-            the aux GPU when every card is spoken for — on 2xGPU the judge sits
-            next to the aux pair on cuda:1, on 4xGPU TP=2 it gets cuda:3 to
-            itself; single-GPU boxes co-host it with P.
+            after P's tensor-parallel ranks and the DD aux devices; failing that,
+            under TP the LAST TP rank (sharded P leaves spare memory there — the
+            judge loads post-profiling, so keep ``gpu_memory_utilization`` low
+            enough to leave it ~5 GB), else the aux GPU. On 2xGPU the judge sits
+            next to the aux pair on cuda:1; on 4xGPU TP=2 (aux pair split over
+            cuda:2/cuda:3) it rides cuda:1; single-GPU boxes co-host it with P.
         interval: Judge every N ENGINE steps — one batched forward over all
             active rows per sweep, so the cost is independent of batch width
             (per-row token counters would desynchronize in large batches and

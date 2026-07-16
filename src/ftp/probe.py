@@ -15,8 +15,9 @@ Usage::
 
 ``--tp`` models P sharded over that many GPUs (tensor parallel — weights and
 KV divide across the ranks): the split recommendation becomes e.g. the 4xGPU
-layout P on cuda:0-1, aux pair on cuda:2, guard judge on cuda:3. Use it when P
-alone (long context / thinking budgets) exceeds one card.
+layout P on cuda:0-1, aux_q (retain) on cuda:2, aux_p (forget) on cuda:3 (one
+engine per card, no fusion), guard judge riding cuda:1's TP spare memory. Use
+it when P alone (long context / thinking budgets) exceeds one card.
 
 The aux footprint estimate models the paged engine: its page pool is
 prewarmed to the ``concurrency × window`` worst case, so the estimate is the
@@ -90,20 +91,22 @@ def kv_per_seq_gb(cfg: dict, ctx_len: int, dtype_bytes: int = 2) -> float:
 
 def aux_pair_footprint_gb(
     aux_p: str, aux_q: str, concurrency: int, window: int, dtype_bytes: int = 2
-) -> tuple[float, str]:
-    """Estimated aux-pair footprint: weights + the prewarmed page pool.
+) -> tuple[float, str, list[float]]:
+    """Estimated aux footprints: weights + the prewarmed page pool, per model.
 
     The pool is sized to the ``concurrency × window`` worst case, so this is
     an UPPER BOUND — live usage is the tokens actually in flight. The engine
     captures no CUDA graphs; ~0.5 GB/model covers eager activations + the
-    flashinfer workspace."""
-    total, parts = 0.0, []
+    flashinfer workspace. Returns (pair total, detail, [aux_p GB, aux_q GB])."""
+    total, parts, per_model = 0.0, [], []
     for m in (aux_p, aux_q):
         w = weights_gb(m)
         slots = kv_per_seq_gb(_load_config(m), window, dtype_bytes) * concurrency
-        total += w + slots + 0.5
+        one = w + slots + 0.5
+        total += one
+        per_model.append(one)
         parts.append(f"{Path(m).name}: weights {w:.1f} + page pool <= {slots:.1f}")
-    return total, "; ".join(parts)
+    return total, "; ".join(parts), per_model
 
 
 def recommend(args) -> None:
@@ -130,8 +133,9 @@ def recommend(args) -> None:
 
     if args.live_aux:
         aux_total, detail = measure_aux_live(args, torch.device(f"cuda:{n_gpu - 1}"))
+        per_model = [aux_total / 2] * 2  # measured jointly; assume an even split
     else:
-        aux_total, detail = aux_pair_footprint_gb(
+        aux_total, detail, per_model = aux_pair_footprint_gb(
             args.aux_p, args.aux_q, args.concurrency, args.window
         )
     print(f"aux pair: ~{aux_total:.1f} GB ({detail})")
@@ -156,26 +160,46 @@ def recommend(args) -> None:
             f"Reduce concurrency/window, use smaller aux models, or split:"
         )
     if n_gpu >= 2:
-        from ftp.config import default_device_layout
+        from ftp.config import default_device_layout, split_aux_device
 
         aux_dev, guard_dev = default_device_layout(n_gpu, tp)
-        aux_idx = int(aux_dev.split(":")[1])
+        p_dev, q_dev = split_aux_device(aux_dev)
         # Per TP rank: weights and KV shard across the ranks; the workspace doesn't.
         p_need = (p_w + kv_pool) / tp + WORKSPACE_GB
         util_split = min(0.95, p_need / cap)
-        co_host = aux_idx < tp  # P spans every GPU: aux shares the last rank's card
-        fits_p = p_need + (aux_total if co_host else 0.0) <= cap
-        fits_aux = co_host or aux_total <= caps[aux_idx] * 0.95
+        if p_dev != q_dev:
+            # Two free GPUs: one aux model per card, two-engine path (no fusion).
+            pi, qi = int(p_dev.split(":")[1]), int(q_dev.split(":")[1])
+            fits_p = p_need <= cap
+            fits_aux = per_model[0] <= caps[pi] * 0.95 and per_model[1] <= caps[qi] * 0.95
+            aux_msg = (
+                f"aux_p (forget) on {p_dev} ({per_model[0]:.1f} of {caps[pi]:.1f} GB), "
+                f"aux_q (retain) on {q_dev} ({per_model[1]:.1f} of {caps[qi]:.1f} GB) "
+                f"via DDConfig(aux_device='{aux_dev}') [two-engine path, no fusion]"
+            )
+        else:
+            aux_idx = int(p_dev.split(":")[1])
+            co_host = aux_idx < tp  # P spans every GPU: aux shares the last rank's card
+            fits_p = p_need + (aux_total if co_host else 0.0) <= cap
+            fits_aux = co_host or aux_total <= caps[aux_idx] * 0.95
+            note = " (CO-HOSTED with a P rank)" if co_host else ""
+            aux_msg = (
+                f"aux pair on {p_dev}{note} ({aux_total:.1f} of {caps[aux_idx]:.1f} GB) "
+                f"via DDConfig(aux_device='{p_dev}')"
+            )
         verdict = "fits" if fits_p and fits_aux else "does NOT fit"
         p_where = "cuda:0" if tp == 1 else f"cuda:0-{tp - 1} (TP={tp})"
         per_gpu = " per GPU" if tp > 1 else ""
-        aux_note = " (CO-HOSTED with a P rank)" if co_host else ""
+        guard_msg = f"degeneration-guard judge (if used) on {guard_dev}"
+        if int(guard_dev.split(":")[1]) < tp:
+            guard_msg += (
+                " — riding that P rank's spare memory (it loads post-profiling; "
+                "keep gpu_memory_utilization low enough to leave it ~5 GB)"
+            )
         print(
             f"SPLIT ({n_gpu} GPUs): {verdict}. P on {p_where} "
             f"({p_need:.1f} of {cap:.1f} GB{per_gpu}, gpu_memory_utilization={util_split:.2f}), "
-            f"aux pair on {aux_dev}{aux_note} ({aux_total:.1f} of {caps[aux_idx]:.1f} GB) "
-            f"via DDConfig(aux_device='{aux_dev}'); degeneration-guard judge (if used) "
-            f"on {guard_dev}."
+            f"{aux_msg}; {guard_msg}."
         )
         if not fits_p and tp < n_gpu:
             print(f"  P exceeds its per-GPU share — rerun with --tp {min(tp * 2, n_gpu)} "

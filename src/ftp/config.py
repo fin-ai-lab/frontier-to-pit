@@ -76,10 +76,15 @@ class DDConfig:
         max_feeds_per_step: Universal mode only — cap on aux tokens fed per
             request per P step (one P token can retokenize into several aux
             tokens; excess queues to the next step).
-        aux_device: Device for the aux engines (e.g. ``"cuda:1"``). Default
-            ``None`` places them on P's device. Putting the aux pair on its
-            own GPU frees P's card for weights and KV; the per-step logits
-            transfer is ~16 MB per model (negligible over NVLink).
+        aux_device: Device(s) for the aux engines. A single device
+            (e.g. ``"cuda:1"``) holds both models; a comma pair
+            (e.g. ``"cuda:3,cuda:2"``, ordered ``aux_p,aux_q``) gives each
+            model its own GPU — that disables fusion (a fused pair is one
+            stacked forward on one GPU) and runs the two-engine path, shared
+            tokenizer mode only. Default ``None`` places both on P's device.
+            Putting the aux models off P's card frees it for weights and KV;
+            the per-step logits transfer is ~16 MB per model (negligible over
+            NVLink).
         fuse_aux: ``"auto"`` (default) stacks the two aux models into ONE
             fused forward when their architectures are identical (~2x faster
             aux step: one batched kernel per layer computes both models),
@@ -141,6 +146,7 @@ class DDConfig:
             raise ValueError(f"aux_kv_gb must be >= 0, got {self.aux_kv_gb}")
         if self.max_feeds_per_step < 1:
             raise ValueError(f"max_feeds_per_step must be >= 1, got {self.max_feeds_per_step}")
+        split_aux_device(self.aux_device)  # validates the "p_dev,q_dev" pair form
         if isinstance(self.suppress_tokens, list):
             object.__setattr__(self, "suppress_tokens", tuple(self.suppress_tokens))
 
@@ -225,6 +231,24 @@ def _cuda_index(device: str | None) -> int | None:
     return None
 
 
+def split_aux_device(aux_device: str | None) -> tuple[str | None, str | None]:
+    """``DDConfig.aux_device`` -> per-model ``(aux_p_device, aux_q_device)``.
+
+    A single device (or ``None``) applies to both models; the comma pair form
+    ``"cuda:3,cuda:2"`` is ordered ``aux_p,aux_q`` (forget first, matching the
+    field order everywhere else). Raises on a malformed pair."""
+    if aux_device is None:
+        return None, None
+    parts = [p.strip() for p in aux_device.split(",")]
+    if len(parts) == 1:
+        return parts[0] or None, parts[0] or None
+    if len(parts) != 2 or not all(parts):
+        raise ValueError(
+            f"aux_device must be one device or an 'aux_p_dev,aux_q_dev' pair, "
+            f"got {aux_device!r}")
+    return parts[0], parts[1]
+
+
 def default_device_layout(
     n_gpu: int,
     tensor_parallel_size: int = 1,
@@ -233,33 +257,50 @@ def default_device_layout(
 ) -> tuple[str | None, str | None]:
     """Default ``(aux_device, guard_device)`` for a box with ``n_gpu`` visible GPUs.
 
-    P occupies the tensor-parallel ranks ``cuda:0 .. cuda:{tp-1}``; the aux pair
-    takes the first GPU after P; the guard judge takes the next free one. When
-    there aren't enough GPUs the placements collapse inward: the guard shares
-    the aux GPU, and when P spans every GPU the aux pair co-hosts with the LAST
-    TP rank (rank 0 also hosts the logits gather + sampler, so the last rank's
-    card has the most headroom). Explicit ``aux_device``/``guard_device`` values
-    pass through untouched; the guard default routes around an explicit aux GPU.
+    P occupies the tensor-parallel ranks ``cuda:0 .. cuda:{tp-1}``. With TWO or
+    more free GPUs after P the aux pair SPLITS, one model per card (the returned
+    ``aux_device`` is the ``"aux_p_dev,aux_q_dev"`` pair form — fusion needs one
+    card, so the split runs the two-engine path); with exactly one free GPU both
+    aux models share it (fused); with none they co-host on the LAST TP rank
+    (rank 0 also hosts the logits gather + sampler, so the last rank's card has
+    the most headroom). The guard judge takes the first free GPU no aux model
+    claimed; failing that, under TP it rides the LAST TP rank's spare memory
+    (sharded P leaves headroom — vLLM is blind to a post-profiling tenant, so
+    keep ``gpu_memory_utilization`` low enough to leave the judge ~5 GB), and
+    with TP=1 it shares an aux card. Explicit ``aux_device`` (single or pair
+    form) / ``guard_device`` values pass through untouched; the guard default
+    routes around explicit aux GPUs.
 
-    Layouts this produces (P = TP ranks, A = aux pair, G = guard judge)::
+    Layouts this produces (P = TP ranks, p/q = aux models, G = guard judge)::
 
-        1 GPU            -> (None, None)          everything co-hosts with P
-        2 GPUs, TP=1     -> P | A+G               the classic 2xH100 split
-        4 GPUs, TP=2     -> P P | A | G           the 4xH100 thinking-mode split
-        4 GPUs, TP=1     -> P | A | G  (cuda:3 idle)
-        n GPUs, TP=n     -> P .. P+A+G            aux+guard on the last rank
+        1 GPU            -> (None, None)            everything co-hosts with P
+        2 GPUs, TP=1     -> P | p+q+G               the classic 2xH100 split
+        4 GPUs, TP=2     -> P P+G | q | p           the 4xH100 thinking-mode split
+        4 GPUs, TP=1     -> P | q | p | G
+        n GPUs, TP=n     -> P .. P+p+q+G            everything on the last rank
     """
     tp = tensor_parallel_size
+    free = list(range(min(tp, n_gpu), n_gpu))
     if aux_device is None and n_gpu > 1:
-        aux_device = f"cuda:{tp}" if tp < n_gpu else f"cuda:{n_gpu - 1}"
+        if not free:
+            aux_device = f"cuda:{n_gpu - 1}"
+        elif len(free) == 1:
+            aux_device = f"cuda:{free[0]}"
+        else:  # split: retain (aux_q) on the lower index, forget (aux_p) above it
+            aux_device = f"cuda:{free[1]},cuda:{free[0]}"
     if guard_device is None:
-        aux_idx = _cuda_index(aux_device)
-        for i in range(min(tp, n_gpu), n_gpu):
-            if i != aux_idx:
-                guard_device = f"cuda:{i}"
-                break
+        aux_idxs = {
+            i for i in map(_cuda_index, split_aux_device(aux_device)) if i is not None
+        }
+        open_gpus = [i for i in free if i not in aux_idxs]
+        if open_gpus:
+            guard_device = f"cuda:{open_gpus[0]}"
+        elif tp > 1:
+            guard_device = f"cuda:{tp - 1}"  # last P rank: TP sharding leaves spare HBM
+        elif aux_idxs:
+            guard_device = f"cuda:{min(aux_idxs)}"
         else:
-            guard_device = aux_device
+            guard_device = aux_device  # single GPU (None) / non-cuda device string
     return aux_device, guard_device
 
 

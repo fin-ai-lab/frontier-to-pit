@@ -34,9 +34,10 @@ untested vLLM. Requirements:
   pass a smaller `--gpu-memory-utilization`).
 - `--think` at its full 20K default context does not fit next to the aux pair on
   2×80GB — it needs 4×80GB: pass `--tensor-parallel-size 2` and the placement follows
-  automatically (the 27B shards over `cuda:0`–`cuda:1`, the aux pair takes `cuda:2`,
-  the guard judge `cuda:3`). `python -m ftp.probe --tp 2 ...` prints the fit math for
-  your models and budgets.
+  automatically (the 27B shards over `cuda:0`–`cuda:1`, the retain aux model takes
+  `cuda:2`, the forget aux model `cuda:3` — one engine per card — and the guard judge
+  rides `cuda:1`'s spare TP memory). `python -m ftp.probe --tp 2 ...` prints the fit
+  math for your models and budgets.
 
 > **Startup time.** Every launch spends ~1–3 min on vLLM's `torch.compile` + warmup
 > (with steering on — the default — the compile cache is disabled for safety, so this

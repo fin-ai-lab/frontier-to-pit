@@ -33,12 +33,15 @@ The 27B P needs an ≥80GB GPU (or --tensor-parallel-size 2 on 40GB cards). Aux
 models download from the Hugging Face Hub by default.
 
 Multi-GPU placement is automatic from the visible GPU count and
---tensor-parallel-size: the aux pair takes the first GPU after P's TP ranks and
-the guard judge the next free one (2xGPU TP=1: P | aux+guard; 4xGPU TP=2:
-P P | aux | guard). --think at the full 20480 context does not fit next to the
-aux pair + guard on 2xH100 — on a 4xGPU box run
-``python run.py chat --think --tensor-parallel-size 2`` and the layout above is
-picked up automatically (--aux-device / --guard-device override it).
+--tensor-parallel-size: with two or more GPUs free after P's TP ranks the aux
+pair SPLITS, one model per card (two-engine path — fusion needs one card); with
+one free GPU both share it fused; the guard judge takes a free card if any
+remain, else rides the last TP rank's spare memory. 2xGPU TP=1:
+P | aux+aux+guard (unchanged); 4xGPU TP=2: P P+guard | aux-retain | aux-forget.
+--think at the full 20480 context does not fit next to the aux pair + guard on
+2xH100 — on a 4xGPU box run ``python run.py chat --think --tensor-parallel-size 2``
+and the layout above is picked up automatically (--aux-device / --guard-device
+override it).
 """
 from __future__ import annotations
 
@@ -127,9 +130,12 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
                     help=f"P context window (default {DEFAULT_MAX_MODEL_LEN}, or "
                          f"{THINK_MAX_MODEL_LEN} with --think, which must fit prompt + CoT)")
     ap.add_argument("--aux-device", default=None,
-                    help="GPU for the aux pair, e.g. cuda:1 (default: first GPU after P's "
-                         "tensor-parallel ranks — cuda:1 on 2xGPU TP=1, cuda:2 on 4xGPU TP=2 — "
-                         "keeping the 27B P and the aux models off the same card)")
+                    help="device(s) for the aux models: one GPU for both (e.g. cuda:1) or a "
+                         "forget,retain pair (e.g. cuda:3,cuda:2) giving each model its own "
+                         "card — the pair form disables fusion. Default: split across the "
+                         "free GPUs after P's TP ranks when there are two (4xGPU TP=2: "
+                         "retain cuda:2, forget cuda:3), one shared card when there is one "
+                         "(2xGPU TP=1: cuda:1)")
     ap.add_argument("--gdn-prefill-backend", default=None, choices=["flashinfer", "triton"],
                     help="Qwen3.5 GDN kernel. Default (flashinfer) JIT-compiles via nvcc on the "
                          "first run (~15-20 min, then cached); 'triton' compiles in seconds — use "
@@ -152,9 +158,11 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
                     help="disable the live degeneration guard (guard is on by default with DD)")
     ap.add_argument("--guard-model", default="Qwen/Qwen3.5-2B", help="judge LM (HF)")
     ap.add_argument("--guard-device", default=None,
-                    help="GPU for the guard judge, e.g. cuda:3 (default: first free GPU after "
-                         "P's TP ranks and the aux pair — cuda:3 on 4xGPU TP=2 — else it shares "
-                         "the aux GPU, as on 2xGPU)")
+                    help="GPU for the guard judge (default: first free GPU after P's TP ranks "
+                         "and the aux models; else under TP the last TP rank's spare memory — "
+                         "cuda:1 on 4xGPU TP=2, where the judge loads post-profiling, so leave "
+                         "it ~5GB under --gpu-memory-utilization — else the aux GPU, as on "
+                         "2xGPU)")
     ap.add_argument("--guard-interval", type=int, default=25,
                     help="judge every N engine steps (one batched check)")
     ap.add_argument("--guard-backtrack", type=int, default=50,
@@ -167,12 +175,13 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
 
 
 def _resolve_devices(args, use_dd: bool) -> tuple[str | None, str | None]:
-    """Place the aux pair and guard judge off P's card(s) on a multi-GPU box.
+    """Place the aux models and guard judge off P's card(s) on a multi-GPU box.
 
     P fills most of its TP ranks via gpu_memory_utilization, so co-locating the
     small models there OOMs. ftp.config.default_device_layout does the math:
-    2xGPU TP=1 -> aux+guard on cuda:1; 4xGPU TP=2 -> aux on cuda:2, guard on
-    cuda:3. Explicit --aux-device / --guard-device always win."""
+    2xGPU TP=1 -> aux pair + guard on cuda:1; 4xGPU TP=2 -> aux pair SPLIT
+    (retain on cuda:2, forget on cuda:3), guard riding cuda:1's TP spare
+    memory. Explicit --aux-device / --guard-device always win."""
     if not use_dd:
         return args.aux_device, args.guard_device
     import torch
@@ -231,8 +240,12 @@ async def _run(args, prompt: str | None) -> None:
               f"gdn_prefill_backend={gdn_backend or 'flashinfer'} — slower per token", flush=True)
     tok = AutoTokenizer.from_pretrained(args.model)
     if use_dd:
+        from ftp.config import split_aux_device
+        p_dev, q_dev = split_aux_device(aux_device)
+        aux_desc = (f"forget@{p_dev} retain@{q_dev} (split, unfused)" if p_dev != q_dev
+                    else f"aux_device={p_dev or 'cuda:0'}")
         print(f"[run] DD on: forget={args.aux_p} retain={args.aux_q} a={args.alpha} "
-              f"aux_device={aux_device or 'cuda:0'}", flush=True)
+              f"{aux_desc}", flush=True)
     if pairs:  # eager route: install after build (pre-capture route bakes it in already)
         await install_steering_async(engine, pairs)
     if steer is not None:

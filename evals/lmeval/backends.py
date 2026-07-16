@@ -792,7 +792,11 @@ class DDVLLM(VLLM):
             from ftp.guard import GuardConfig
 
             gk = dict(dd_guard_kwargs or {})
-            gk.setdefault("device", aux_device)
+            # aux_device may be the per-model "p_dev,q_dev" pair form; the judge
+            # needs ONE device — default to aux_q's card.
+            from ftp.config import split_aux_device
+
+            gk.setdefault("device", split_aux_device(aux_device)[1])
             self._guard = GuardConfig(**gk)
             from ftp.vllm import GuardLogitsProcessor
 

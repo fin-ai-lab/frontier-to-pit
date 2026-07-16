@@ -38,18 +38,27 @@ adheres to [Semantic Versioning](https://semver.org/).
   tokens are held back until they survive the walk-back window, so a rewind
   never has to un-print (the visible stream trails generation by ~1 s).
 
-- **4×GPU layout support** (`ftp.config.default_device_layout`; `run.py
+- **4×GPU layout support** (`ftp.config.default_device_layout` /
+  `split_aux_device`; per-model `DDConfig.aux_device` pair form; `run.py
   --guard-device`; `ftp.probe --tp`). Device placement is now derived from the
   visible GPU count and P's `--tensor-parallel-size` instead of assuming the
-  2×GPU split: the aux pair defaults to the first GPU after P's TP ranks and the
-  guard judge to the next free one (2×GPU TP=1: P | aux+guard on `cuda:1`,
-  unchanged; 4×GPU TP=2: P sharded over `cuda:0`–`1`, aux on `cuda:2`, guard on
-  `cuda:3`). Motivation: `--think` at its 20480 default context does not fit
-  next to the aux pair + guard on 2×H100 — on a 4×GPU box
-  `run.py chat --think --tensor-parallel-size 2` now lays itself out correctly
-  with no device flags. The guard's engine-side default (env route) follows the
-  same layout; `ftp.probe --tp N` models P's weights+KV sharded over N ranks and
-  prints the per-GPU fit, aux/guard placement, and `gpu_memory_utilization`.
+  2×GPU split. With two or more GPUs free after P's TP ranks the aux pair
+  SPLITS, one model per card — `DDConfig.aux_device` accepts an
+  `"aux_p_dev,aux_q_dev"` pair (e.g. `"cuda:3,cuda:2"`), which runs the
+  two-engine path (fusion needs one card; shared tokenizer mode only, and each
+  logits plane crosses to P's GPU independently). The guard judge takes a free
+  card if any remain, else rides the LAST TP rank's spare memory (sharded P
+  leaves headroom); like the DD aux engines, under TP the judge now loads at
+  its first sweep — post-profiling, where an external allocation on a TP
+  rank's card would crash the worker — so leave it ~5 GB of
+  `gpu_memory_utilization` headroom. Layouts: 2×GPU TP=1 unchanged
+  (P | aux pair+guard on `cuda:1`); 4×GPU TP=2: P over `cuda:0`–`1` + guard on
+  `cuda:1`, retain aux on `cuda:2`, forget aux on `cuda:3`. Motivation:
+  `--think` at its 20480 default context does not fit next to the aux pair +
+  guard on 2×H100 — on a 4×GPU box `run.py chat --think --tensor-parallel-size 2`
+  now lays itself out correctly with no device flags. `ftp.probe --tp N` models
+  P's weights+KV sharded over N ranks and prints the per-GPU fit, per-model aux
+  placement, and `gpu_memory_utilization`.
 
 ### Fixed
 
