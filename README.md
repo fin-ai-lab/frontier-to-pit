@@ -47,6 +47,7 @@ untested vLLM. Requirements:
 uv run python run.py chat --fast                       # DD + steering, fastest startup
 uv run python run.py generate --fast "Using only information through December 31, 2015, predict the 2016 GOP Presidential Nominee. Answer in one short paragraph." # one prompt, stream, exit
 uv run python run.py chat --fast --think               # reasoning on for the session
+uv run python run.py chat --fast --no-guard            # disable the degeneration guard
 uv run python run.py chat --fast --no-dd --no-steer    # plain base model
 ```
 
@@ -66,6 +67,25 @@ ban is dropped, and the budgets rise to the evals' thinking arm (`--max-new 1638
 `--max-model-len 20480`; pass either explicitly to override). Treat it as
 **exploratory** — α and the steering clamp are calibrated with thinking off, and the
 benchmarks below are NOTHINK, so `--think` is off the measured config.
+
+### The live degeneration guard (on by default with DD)
+
+Under a strong DD push a reply can occasionally collapse into a repeating loop or
+symbol spam. A small judge LM (`Qwen/Qwen3.5-2B`, loaded on the aux GPU) watches every
+reply as it generates: every 25 engine steps it reads the newest 50 tokens, and when it
+sees mechanical collapse the reply is **rewound 50 tokens and resampled** — the fusion
+(and therefore the unlearning) stays at full strength, only the collapse is repaired.
+If a reply keeps breaking at the same spot, the rewind deepens (100, 150, … tokens);
+one that can't produce ANY clean text returns
+`[Could not generate without degeneration]` instead of garbage.
+
+Because of the rewind window, **streaming is held back by ~50 tokens**: text appears in
+blocks once it can no longer be rewound (about a second behind generation), and on the
+rare deep rewind the runner prints `⟲ retracting the passage above and rewriting`.
+`--no-guard` disables the whole mechanism; `--guard-interval/--guard-backtrack/
+--guard-threshold/--guard-tries` tune it. The judge adds one small batched forward per
+25 steps on the aux GPU — throughput impact is negligible, and replies that never
+degenerate are never interrupted.
 
 `--fast` is the quick-try / startup-timing bundle: it implies `--enforce-eager`
 (skip torch.compile + CUDA-graph capture, ~1–3 min) **and** `--gdn-prefill-backend
@@ -109,6 +129,12 @@ at build time (baked into the CUDA graphs). Drop `steer=` for DD-only, or omit t
 `aux_*` args for steering-only. The `bad_words` entry above is the NOTHINK ban that
 matches the benchmarks — for the `--think` equivalent, drop it *and* render the prompt
 with `apply_chat_template(..., enable_thinking=True)`, since the two must agree.
+
+For the degeneration guard, pass `guard=GuardConfig()` (from `ftp.guard`) to
+`build_llm` — that installs detection in the engine — and generate through
+`ftp.guard.rollback_generate(llm, token_prompts, sp, marker_id=resolve_marker_id(tok),
+backtrack=50, decode=tok.decode)`, which handles the rewind-and-resample. `run.py`
+wires both ends for you.
 
 Run it inside the project's environment with `uv run python your_script.py`.
 

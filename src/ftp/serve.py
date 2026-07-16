@@ -18,8 +18,9 @@ import os
 from dataclasses import dataclass
 
 from ftp.config import DDConfig
+from ftp.guard import GuardConfig
 from ftp.steering import SaeSource, SteerSpec, _install_on_model
-from ftp.vllm import DDLogitsProcessor
+from ftp.vllm import DDLogitsProcessor, GuardLogitsProcessor
 
 
 @dataclass
@@ -105,7 +106,8 @@ def steer_precapture_kwargs(steer: SteerArgs) -> dict:
 
 
 def _common_kwargs(model, *, dd_cfg, steering, tp, gpu_mem, max_len,
-                   steer_precapture=None, gdn_prefill_backend=None, force_eager=False):
+                   steer_precapture=None, gdn_prefill_backend=None, force_eager=False,
+                   guard_cfg=None):
     """Engine args shared by the offline and async builders.
 
     Steering has two install routes:
@@ -139,6 +141,7 @@ def _common_kwargs(model, *, dd_cfg, steering, tp, gpu_mem, max_len,
         kw["gdn_prefill_backend"] = gdn_prefill_backend
     if steer_precapture is not None:
         kw.update(steer_precapture_kwargs(steer_precapture))
+    procs = []
     if dd_cfg is not None:
         # Ship the module-level (picklable) processor class + config via DD_* env.
         # vLLM spawns the engine-core whenever CUDA is already initialized (e.g.
@@ -149,7 +152,14 @@ def _common_kwargs(model, *, dd_cfg, steering, tp, gpu_mem, max_len,
         # the worker — surviving both fork and spawn; the round-trip is lossless
         # (config.to_env/from_env cover every field). env is inherited by spawn.
         dd_cfg.apply_env()
-        kw["logits_processors"] = [DDLogitsProcessor]
+        procs.append(DDLogitsProcessor)
+    if guard_cfg is not None:
+        # Same env route (DD_GUARD_*). Guard runs LAST so a trip's forced marker
+        # overrides the DD fusion and steering for that row.
+        guard_cfg.apply_env()
+        procs.append(GuardLogitsProcessor)
+    if procs:
+        kw["logits_processors"] = procs
     return kw
 
 
@@ -161,6 +171,7 @@ def build_llm(
     dd_kwargs: dict | None = None,
     steer: SteerArgs | None = None,
     steer_precapture: bool = True,
+    guard: GuardConfig | None = None,
     tensor_parallel_size: int = 1,
     gpu_memory_utilization: float = 0.90,
     max_model_len: int = 4096,
@@ -176,7 +187,12 @@ def build_llm(
     ``_common_kwargs``). The trade: clamp values are capture-time constants.
     Pass ``steer_precapture=False`` ONLY when the hooks must change in-process
     after build (e.g. clamp sweeps via remove+reinstall) — that route forces
-    ``enforce_eager`` and roughly halves throughput."""
+    ``enforce_eager`` and roughly halves throughput.
+
+    ``guard`` installs the live degeneration guard (:mod:`ftp.guard`) in the
+    engine. That is the DETECTION half only — pair generation with
+    :func:`ftp.guard.rollback_generate` (and its marker in ``stop_token_ids``)
+    to get the rewind-and-resample behavior."""
     from vllm import LLM
 
     from ftp.steering import install_steering
@@ -188,6 +204,7 @@ def build_llm(
         tp=tensor_parallel_size, gpu_mem=gpu_memory_utilization, max_len=max_model_len,
         steer_precapture=steer if (pairs and steer_precapture) else None,
         gdn_prefill_backend=gdn_prefill_backend,
+        guard_cfg=guard,
     )
     kw["max_num_seqs"] = max_num_seqs
     if pairs and steer_precapture and ({"worker_cls", "enforce_eager"} & llm_kwargs.keys()):
@@ -210,6 +227,7 @@ def build_async_llm(
     dd_kwargs: dict | None = None,
     steer: SteerArgs | None = None,
     steer_precapture: bool = True,
+    guard: GuardConfig | None = None,
     tensor_parallel_size: int = 1,
     gpu_memory_utilization: float = 0.90,
     max_model_len: int = 4096,
@@ -246,6 +264,7 @@ def build_async_llm(
         steer_precapture=steer if use_precapture else None,
         gdn_prefill_backend=gdn_prefill_backend,
         force_eager=enforce_eager,
+        guard_cfg=guard,
     )
     engine = AsyncLLM.from_engine_args(AsyncEngineArgs(**kw))
     return engine, dd_cfg, [] if use_precapture else pairs

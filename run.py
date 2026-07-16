@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import copy
 import os
 import signal
 import sys
@@ -45,6 +46,7 @@ import uuid
 from transformers import AutoTokenizer
 from vllm import SamplingParams
 
+from ftp.guard import GuardConfig, resolve_marker_id
 from ftp.prompts import FORECAST_SYSTEM_PROMPT
 from ftp.serve import (
     SteerArgs,
@@ -131,6 +133,24 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
                          "triton (skips BOTH the ~1-3 min compile and the ~15-20 min first-run "
                          "nvcc GDN build). Small per-token cost; ideal for a quick try / timing "
                          "startup. Explicit --gdn-prefill-backend still wins.")
+    # Live degeneration guard (ftp.guard): a small judge LM on the aux GPU checks the
+    # last --guard-backtrack tokens every --guard-interval engine steps; on a trip the
+    # reply is rewound that many tokens and resampled. ON by default whenever DD is on
+    # (the guard exists to repair the DD push's rare decoding collapse). Streaming
+    # holds back the newest --guard-backtrack tokens so a rewind never has to un-print
+    # anything — the visible stream trails generation by ~1s and arrives in blocks.
+    ap.add_argument("--no-guard", action="store_true",
+                    help="disable the live degeneration guard (guard is on by default with DD)")
+    ap.add_argument("--guard-model", default="Qwen/Qwen3.5-2B", help="judge LM (HF)")
+    ap.add_argument("--guard-interval", type=int, default=25,
+                    help="judge every N engine steps (one batched check)")
+    ap.add_argument("--guard-backtrack", type=int, default=50,
+                    help="tokens judged per check AND discarded per rewind")
+    ap.add_argument("--guard-threshold", type=float, default=0.9,
+                    help="trip when p(degenerated) >= this")
+    ap.add_argument("--guard-tries", type=int, default=2,
+                    help="stuck-point resamples before the walk-back deepens by "
+                         "another --guard-backtrack (50 -> 100 -> 150 ...)")
 
 
 def _resolve_aux_device(args, use_dd: bool) -> str | None:
@@ -163,12 +183,23 @@ async def _run(args, prompt: str | None) -> None:
         THINK_MAX_NEW if args.think else DEFAULT_MAX_NEW)
     max_model_len = args.max_model_len if args.max_model_len is not None else (
         THINK_MAX_MODEL_LEN if args.think else DEFAULT_MAX_MODEL_LEN)
+    # Live degeneration guard: ON by default with DD (it exists to repair the DD
+    # push's rare decoding collapse). With --no-dd there is nothing it needs to
+    # repair, and on a single-GPU box the judge would squeeze in next to P.
+    guard_cfg = None
+    if use_dd and not args.no_guard:
+        guard_cfg = GuardConfig(
+            model=args.guard_model, device=aux_device,
+            interval=args.guard_interval, backtrack=args.guard_backtrack,
+            threshold=args.guard_threshold, tries=args.guard_tries,
+        )
     engine, _dd_cfg, pairs = build_async_llm(
         args.model,
         aux_p=args.aux_p if use_dd else None,
         aux_q=args.aux_q if use_dd else None,
         dd_kwargs={"aux_device": aux_device} if aux_device else None,
         steer=steer,
+        guard=guard_cfg,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=max_model_len,
@@ -188,6 +219,13 @@ async def _run(args, prompt: str | None) -> None:
     if steer is not None:
         desc = ", ".join(f"L{layer}:{f}@{v:g}" for layer, f, v in parse_steer(args.steer))
         print(f"[run] steering on: {desc}", flush=True)
+    marker_id = resolve_marker_id(tok, guard_cfg.marker) if guard_cfg else None
+    if guard_cfg:
+        print(f"[run] 🛡 guard on: judge={guard_cfg.model} every {guard_cfg.interval} engine "
+              f"steps; a tripped reply rewinds {guard_cfg.backtrack} tokens and resamples. "
+              f"Streaming holds back the newest {guard_cfg.backtrack} tokens (so a rewind "
+              f"never has to un-print) — the visible stream trails generation by ~1s. "
+              f"--no-guard to disable.", flush=True)
     if args.think:
         print(f"[run] 🧠 thinking ON: real <think> block, max_new={max_new} "
               f"max_model_len={max_model_len} — EXPLORATORY: alpha/clamp are calibrated "
@@ -212,6 +250,10 @@ async def _run(args, prompt: str | None) -> None:
         extra_args={"dd_alpha": args.alpha} if use_dd else None,
     )
 
+    # The rid actually in flight (the guarded path issues one request per rewind
+    # round under derived ids) — ENTER-abort targets this, not the turn's base rid.
+    live_rid: dict[str, str] = {}
+
     async def reply(messages, request_id: str) -> str:
         # enable_thinking drives the Qwen3.5 template: False appends an empty
         # <think></think> to the generation prompt (reasoning pre-closed), True leaves it
@@ -223,11 +265,93 @@ async def _run(args, prompt: str | None) -> None:
             messages, tokenize=False, add_generation_prompt=True, enable_thinking=args.think
         )
         print("asst> ", end="", flush=True)
-        full = ""
-        async for delta in stream(engine, text, sp, request_id=request_id):
-            print(delta, end="", flush=True)
-            full += delta
-        print()
+        live_rid["rid"] = request_id
+        if guard_cfg is None:
+            full = ""
+            async for delta in stream(engine, text, sp, request_id=request_id):
+                print(delta, end="", flush=True)
+                full += delta
+            print()
+            return full
+        return await guarded_reply(text, request_id)
+
+    async def guarded_reply(text: str, request_id: str) -> str:
+        """Stream in APPROVED blocks: only text older than the walk-back window is
+        printed, so a rewind never has to un-print anything. The newest
+        ``backtrack`` tokens (= the rewindable region, spanning the current and
+        previous judge blocks) stay held back until they survive; the stream
+        arrives in blocks trailing generation by ~backtrack tokens.
+
+        Same escalation policy as ftp.guard.rollback_generate: ``tries``
+        no-progress rewinds at one point deepen the walk-back by another
+        ``backtrack``; breaking all the way back at the first tokens prints the
+        visible failure string instead of garbage."""
+        from ftp.guard import FAIL_TEXT
+
+        prompt_ids = tok(text, add_special_tokens=False)["input_ids"]
+        backtrack = guard_cfg.backtrack
+        accepted: list[int] = []
+        printed = ""
+        rewinds = consec = rounds = 0
+        failed = False
+        while max_new - len(accepted) > 0 and rounds < guard_cfg.max_rounds:
+            sp_r = copy.deepcopy(sp)
+            sp_r.max_tokens = max_new - len(accepted)
+            sp_r.stop_token_ids = sorted(set(sp_r.stop_token_ids or []) | {marker_id})
+            rrid = f"{request_id}-r{rounds}"
+            live_rid["rid"] = rrid
+            rounds += 1
+            final = None
+            async for out in engine.generate(
+                {"prompt_token_ids": prompt_ids + accepted}, sp_r, request_id=rrid
+            ):
+                final = out
+                merged = accepted + list(out.outputs[0].token_ids)
+                safe = tok.decode(merged[:max(0, len(merged) - backtrack)],
+                                  skip_special_tokens=True)
+                if len(safe) > len(printed):
+                    print(safe[len(printed):], end="", flush=True)
+                    printed = safe
+            if final is None:  # aborted before any output
+                break
+            comp = final.outputs[0]
+            ids = list(comp.token_ids)
+            tripped = getattr(comp, "stop_reason", None) == marker_id or (
+                ids and ids[-1] == marker_id)
+            if ids and ids[-1] == marker_id:
+                ids = ids[:-1]
+            if not tripped:
+                accepted += ids
+                break
+            rewinds += 1
+            kept = ids[:max(0, len(ids) - backtrack)]
+            if kept:
+                accepted += kept
+                consec = 1
+            else:
+                consec += 1
+                if consec >= guard_cfg.tries:
+                    if not accepted:  # breaking at the very first tokens: fail visibly
+                        failed = True
+                        break
+                    accepted = accepted[:max(0, len(accepted) - backtrack)]
+                    consec = 0
+                    # A deepened walk-back can retract text that was already printed
+                    # (it was outside the original hold-back window). A terminal
+                    # can't un-print, so say so and re-stream the passage.
+                    safe_now = tok.decode(accepted, skip_special_tokens=True)
+                    if len(printed) > len(safe_now):
+                        print("\n[guard] ⟲ retracting the passage above and rewriting:",
+                              flush=True)
+                        printed = safe_now
+        if failed and not accepted:
+            print(FAIL_TEXT, flush=True)
+            return FAIL_TEXT
+        full = tok.decode(accepted, skip_special_tokens=True)
+        print(full[len(printed):], flush=True)  # flush the held-back tail
+        if rewinds:
+            print(f"[guard] ⟲ {rewinds} rewind(s); walk-back {backtrack} tokens, "
+                  f"deepened after {guard_cfg.tries} stuck tries", flush=True)
         return full
 
     try:
@@ -289,11 +413,11 @@ async def _run(args, prompt: str | None) -> None:
                 # ENTER pressed mid-reply: abort the request (engine stays up), drain.
                 if stop_key.result() == "":  # it was actually EOF (Ctrl-D) mid-reply
                     with contextlib.suppress(Exception):
-                        await engine.abort(rid)
+                        await engine.abort(live_rid.get("rid", rid))
                     print("\n[run] 🛑 exiting", flush=True)
                     break
                 with contextlib.suppress(Exception):
-                    await engine.abort(rid)
+                    await engine.abort(live_rid.get("rid", rid))
                 with contextlib.suppress(Exception):
                     await reply_task
                 print("[run] ⏹  reply stopped (press ENTER to stop a reply; "

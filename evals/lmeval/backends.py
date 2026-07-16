@@ -725,7 +725,7 @@ class DDVLLM(VLLM):
     def __init__(
         self, pretrained, aux_p=None, aux_q=None, dd_alpha=1.5, dd_window=2048, dd_mode="auto",
         aux_device=None, compile_aux=False, prewarm=0, fuse_pin=True, steer=None,
-        steer_sweep=False, dd_retemplate=None, **kwargs,
+        steer_sweep=False, dd_retemplate=None, dd_guard=False, dd_guard_kwargs=None, **kwargs,
     ):
         import os
 
@@ -781,10 +781,35 @@ class DDVLLM(VLLM):
             from ftp.serve import steer_precapture_kwargs
 
             kwargs.update(steer_precapture_kwargs(steer))
-        if self._dd:  # steering-only (no aux) skips the DD logits processor entirely
-            kwargs.setdefault("logits_processors", [DDLogitsProcessor])
+        # dd_guard: the live degeneration guard (ftp.guard) — detection in-engine
+        # (GuardLogitsProcessor, judge on the aux GPU), rewind client-side in
+        # _model_generate via rollback_generate. dd_guard_kwargs override GuardConfig
+        # fields (interval/backtrack/threshold/model/...). Guard runs LAST in the
+        # processor list so its forced marker overrides the DD fusion for that row.
+        self._guard = None
+        procs = [DDLogitsProcessor] if self._dd else []
+        if dd_guard:
+            from ftp.guard import GuardConfig
+
+            gk = dict(dd_guard_kwargs or {})
+            gk.setdefault("device", aux_device)
+            self._guard = GuardConfig(**gk)
+            from ftp.vllm import GuardLogitsProcessor
+
+            self._guard.apply_env()
+            procs.append(GuardLogitsProcessor)
+        if procs:
+            kwargs.setdefault("logits_processors", procs)
+        # Prefix caching stays OFF even with the guard (a rollback re-prefills
+        # prompt + accepted tokens in full): retries are the rare path, and keeping
+        # the engine config byte-identical to the unguarded production arm means a
+        # guard-vs-prod delta is the guard alone.
         kwargs.setdefault("enable_prefix_caching", False)
         super().__init__(pretrained=pretrained, **kwargs)
+        if self._guard is not None:
+            from ftp.guard import resolve_marker_id
+
+            self._guard_marker = resolve_marker_id(self.tokenizer, self._guard.marker)
         if self._steer_pairs and self._steer_sweep:
             from ftp.steering import install_steering
 
@@ -851,4 +876,21 @@ class DDVLLM(VLLM):
                 extra.setdefault("dd_alpha", self.dd_alpha)
                 extra.setdefault("dd_rank_k", self.dd_rank_k)
                 sp.extra_args = extra
+        if self._guard is not None and generate and sampling_params is not None:
+            from ftp.guard import rollback_generate
+
+            outs, stats = rollback_generate(
+                self.model, requests, sampling_params,
+                marker_id=self._guard_marker,
+                backtrack=self._guard.backtrack,
+                tries=self._guard.tries,
+                max_rounds=self._guard.max_rounds,
+                decode=lambda ids: self.tokenizer.decode(ids, skip_special_tokens=True),
+                use_tqdm=self.batch_size == "auto",
+            )
+            if stats["rollbacks"]:
+                print(f"[guard] {stats['rollbacks']} rollbacks across "
+                      f"{len(requests)} requests ({stats['escalations']} deepened "
+                      f"walk-backs, {stats['failed']} failed visibly)", flush=True)
+            return outs
         return super()._model_generate(requests, generate=generate, sampling_params=sampling_params)

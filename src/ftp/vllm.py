@@ -53,6 +53,7 @@ from vllm.v1.sample.logits_processor.interface import BatchUpdate
 from ftp.config import DDConfig
 from ftp.core import build_special_ids, dd_fuse
 from ftp.engine import AuxBatchedEngine
+from ftp.guard import DegenJudge, GuardConfig, resolve_marker_id, window_ids
 from ftp.paired import check_fusable
 from ftp.translate import (
     TokenTextTable,
@@ -855,3 +856,194 @@ class DDLogitsProcessor(AdapterLogitsProcessor):
                 raise ValueError(f"dd_rank_k must be an int, got {extra['dd_rank_k']!r}") from e
             if rank_k < 0:
                 raise ValueError(f"dd_rank_k must be >= 0, got {rank_k}")
+
+
+# ═══════════════ Live degeneration guard (see ftp.guard for the design) ═══════════════
+
+
+def make_guard_processor(
+    cfg: GuardConfig, *, name: str = "ConfiguredGuardLogitsProcessor"
+) -> type[GuardLogitsProcessor]:
+    """Bake a :class:`~ftp.guard.GuardConfig` into a logits-processor class.
+
+    Same env fallback contract as :func:`make_processor`: the config is also
+    written to ``os.environ`` so an engine-core subprocess started with spawn
+    (where the dynamic subclass may not survive pickling) reconstructs it from
+    ``DD_GUARD_*``.
+    """
+    cfg.apply_env()
+    return type(name, (GuardLogitsProcessor,), {"guard_config": cfg})
+
+
+class _GuardReqCtx:
+    """Per-request guard state.
+
+    ``tripped``: 0 = clean, 1 = trip pending (force the marker this step),
+    2 = marker already forced (force EOS from now on — a client that forgot to
+    register the marker as a stop token gets a normal EOS finish instead of
+    marker spam to the budget). The 3-arg ``__call__`` signature makes
+    AdapterLogitsProcessor pre-bind (prompt_ids, output_ids) into the stored
+    partial, exactly like :class:`_DDReqCtx`.
+    """
+
+    __slots__ = ("last_checked", "tripped")
+
+    def __init__(self) -> None:
+        self.last_checked = 0
+        self.tripped = 0
+
+    def __call__(
+        self,
+        prompt_ids: list[int] | None,
+        output_ids: list[int],
+        logits: torch.Tensor,
+    ) -> torch.Tensor:
+        raise RuntimeError("_GuardReqCtx.__call__ must not be invoked directly")
+
+
+class GuardLogitsProcessor(AdapterLogitsProcessor):
+    """Live degeneration guard as a vLLM v1 LogitsProcessor.
+
+    Independent of (and composable with) :class:`DDLogitsProcessor` — install it
+    LAST in ``logits_processors`` so a trip's forced marker overrides the DD
+    fusion. Configuration via the ``guard_config`` class attribute
+    (:func:`make_guard_processor`) or ``DD_GUARD_*`` env
+    (:meth:`~ftp.guard.GuardConfig.from_env`).
+
+    Per request, every ``interval`` generated tokens: decode the last
+    ``backtrack`` tokens of prompt+output with P's tokenizer and judge all due
+    windows in ONE batched forward of the small judge LM on ``cfg.device``
+    (default: the DD aux GPU). On p(degen) >= threshold, force the reserved
+    marker token — the client sees a normal stop with ``stop_reason ==
+    marker_id`` and handles the rewind (:func:`ftp.guard.rollback_generate`).
+    Requests opt out via ``SamplingParams.extra_args={"dd_guard": 0}`` (the
+    rescue-exhausted resubmit path).
+    """
+
+    guard_config: ClassVar[GuardConfig | None] = None
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        is_pin_memory: bool,
+    ) -> None:
+        super().__init__(vllm_config, device, is_pin_memory)
+        cfg = type(self).guard_config or GuardConfig.from_env()
+        self._cfg = cfg
+
+        # Same TP contract as DDLogitsProcessor: vLLM gathers logits to rank 0;
+        # other ranks never see real logits, so they must not load a judge copy.
+        tp_rank = 0
+        try:
+            from vllm.distributed import get_tensor_model_parallel_rank
+
+            tp_rank = get_tensor_model_parallel_rank()
+        except Exception:  # noqa: BLE001 — outside a TP worker there is no group
+            tp_rank = 0
+        self._inert = tp_rank > 0
+        if self._inert:
+            print(f"[GuardLogitsProcessor] TP rank {tp_rank}: inert", flush=True)
+            return
+
+        p_tok_path = getattr(
+            getattr(vllm_config, "model_config", None), "tokenizer", None
+        )  # None on vllm config layout drift
+        self._tok = AutoTokenizer.from_pretrained(
+            p_tok_path or os.environ.get("DD_TOK_PATH") or cfg.model, trust_remote_code=True
+        )
+        self._marker = resolve_marker_id(self._tok, cfg.marker)
+        self._eos = self._tok.eos_token_id
+
+        # Judge placement: explicit cfg.device > the DD aux device (the guard's
+        # documented default home: the second GPU, next to the aux pair) > the
+        # last visible GPU when there is more than one > P's own device.
+        dev = cfg.device or os.environ.get("DD_AUX_DEVICE") or None
+        if dev is None:
+            n = torch.cuda.device_count() if torch.cuda.is_available() else 0
+            dev = f"cuda:{n - 1}" if n > 1 else device
+        self._judge_device = torch.device(dev)
+        self._judge = DegenJudge(cfg, self._judge_device)
+        self._steps = 0
+        print(
+            f"[GuardLogitsProcessor] judge={cfg.model} on {self._judge_device} "
+            f"interval={cfg.interval} backtrack={cfg.backtrack} "
+            f"threshold={cfg.threshold} marker={cfg.marker!r}(id {self._marker})",
+            flush=True,
+        )
+
+    # ── Per-request setup ─────────────────────────────────────────────────────
+
+    def new_req_logits_processor(self, params: SamplingParams) -> _GuardReqCtx | None:
+        extra = params.extra_args or {}
+        if not int(extra.get("dd_guard", 1)):
+            return None  # guard-off request (the rescue-exhausted resubmit)
+        return _GuardReqCtx()
+
+    # ── Batched apply ─────────────────────────────────────────────────────────
+
+    def _force(self, logits: torch.Tensor, batch_idx: int, token_id: int) -> None:
+        # -inf everything else: survives any downstream monotone transform
+        # (temperature/top-p/top-k/min-p can't resurrect -inf rows), and the
+        # penalties only subtract finite values from the one finite logit.
+        logits[batch_idx, :] = float("-inf")
+        logits[batch_idx, token_id] = 0.0
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        if self._inert or not self.req_info:
+            return logits
+        cfg = self._cfg
+        # GLOBAL cadence: the judge fires once every `interval` ENGINE steps, as one
+        # batched forward over every due row — NOT per-row token counters. Per-row
+        # counters desynchronize in large batches (staggered starts, retries), so
+        # some row is due almost every step and the "1 check per 25 tokens" design
+        # degrades into a judge forward per step, taxing the whole batch. One sweep
+        # per 25 steps costs the same single forward regardless of batch width;
+        # rows still gain ~interval tokens between sweeps (one token per step).
+        self._steps += 1
+        sweep = self._steps % cfg.interval == 0
+        due: list[tuple[int, _GuardReqCtx]] = []
+        texts: list[str] = []
+        for batch_idx, partial_fn in self.req_info.items():
+            ctx = partial_fn.func
+            output_ids = partial_fn.args[1]
+            n = len(output_ids)
+            if ctx.tripped:
+                # Trip already decided (only THIS row is affected — the rest of the
+                # batch decodes on untouched): marker once, then EOS as belt-and-
+                # suspenders for clients that didn't register the marker stop.
+                self._force(logits, batch_idx, self._marker if ctx.tripped == 1 else self._eos)
+                ctx.tripped = 2
+                continue
+            if not sweep:
+                continue
+            if output_ids and output_ids[-1] == -1:
+                continue  # async placeholder — not yet materialized on host
+            if n < cfg.min_tokens:
+                continue  # too young to judge: a 2-token "**" is not yet spam
+            if n <= ctx.last_checked:
+                continue  # paused request — no new tokens since its last check
+            ctx.last_checked = n
+            ids = window_ids(partial_fn.args[0], output_ids, cfg.backtrack)
+            due.append((batch_idx, ctx))
+            texts.append(self._tok.decode(ids, skip_special_tokens=False))
+        if texts:
+            for (batch_idx, ctx), bad in zip(due, self._judge.tripped(texts), strict=True):
+                if bad:
+                    ctx.tripped = 2
+                    self._force(logits, batch_idx, self._marker)
+        return logits
+
+    # ── Misc ──────────────────────────────────────────────────────────────────
+
+    def is_argmax_invariant(self) -> bool:
+        return False
+
+    @classmethod
+    def validate_params(cls, sampling_params: SamplingParams) -> None:
+        extra = sampling_params.extra_args or {}
+        if "dd_guard" in extra:
+            try:
+                int(extra["dd_guard"])
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"dd_guard must be 0/1, got {extra['dd_guard']!r}") from e
