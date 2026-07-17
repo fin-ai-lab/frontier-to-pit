@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pipx run ruff check src tests evals
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install CPU torch
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install -e .[dev]
+      # GPU tests are deselected by default (addopts = "-m 'not gpu'").
+      - run: |
+          set -o pipefail
+          pytest -v 2>&1 | tee pytest-out.txt
+      - name: Annotate failure detail
+        if: failure()
+        run: |
+          {
+            grep -E "^(FAILED|ERROR)" pytest-out.txt | head -30
+            echo "==== output tail ===="
+            tail -c 3000 pytest-out.txt
+          } > fail.txt
+          echo "::error::$(sed ':a;N;$!ba;s/\n/%0A/g' fail.txt)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-out-${{ matrix.python-version }}
+          path: pytest-out.txt
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pipx run build
+      - run: pipx run twine check dist/*
+      - name: Wheel install smoke test
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install dist/*.whl
+          python -c "import ftp; print(ftp.__version__)"

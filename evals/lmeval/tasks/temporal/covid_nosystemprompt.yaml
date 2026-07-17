@@ -1,0 +1,72 @@
+task: covid_nosystemprompt
+custom_dataset: !function utils.load_covid
+test_split: test
+output_type: generate_until
+doc_to_text: !function utils.covid_doc_to_text
+# No-system-prompt twin for the point-in-time baselines (Aux 2015, PiT-FT,
+# ChronoGPT, Talkie): identical dataset/metrics, but NO system message at all
+# (no `description:` key). The frontier group (Qwen 27B/2B + Ours) runs the
+# canonical `covid` task with the per-doc benchmark system prompt.
+doc_to_target: ""
+process_results: !function utils.covid_process_results
+num_fewshot: 0
+repeats: 1
+generation_kwargs:
+  until: []
+  do_sample: true
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 20
+  repetition_penalty: 1.1
+  max_gen_toks: 768
+filter_list:
+  - name: all
+    filter:
+      - function: take_all
+metric_list:
+  # Headline: COVID mentions when predicting 2020 (the look-ahead window).
+  - metric: covid_2020_rate
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: pandemic_2020_rate
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: disease_outbreak_2020_rate
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: supply_chain_2020_rate
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  # 2018 -> 2019 = pre-pandemic control (should be ~0); each phrase, paired with 2020.
+  - metric: covid_2019_rate
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: pandemic_2019_rate
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: disease_outbreak_2019_rate
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: supply_chain_2019_rate
+    aggregation: !function utils.ratio_agg
+    higher_is_better: false
+  - metric: mentions_per_1k_2020
+    aggregation: !function utils.per1k_agg
+    higher_is_better: false
+  - metric: mentions_per_1k_2020_think
+    aggregation: !function utils.per1k_agg
+    higher_is_better: false
+  - metric: mentions_per_1k_2020_final
+    aggregation: !function utils.per1k_agg
+    higher_is_better: false
+  - metric: mentions_per_1k_2019
+    aggregation: !function utils.per1k_agg
+    higher_is_better: false
+  - metric: mentions_per_1k_2019_think
+    aggregation: !function utils.per1k_agg
+    higher_is_better: false
+  - metric: mentions_per_1k_2019_final
+    aggregation: !function utils.per1k_agg
+    higher_is_better: false
+metadata:
+  version: 1

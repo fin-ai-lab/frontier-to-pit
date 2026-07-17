@@ -1,0 +1,99 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "frontier-to-pit"
+version = "0.2.0"
+description = "Frontier to point-in-time: reduce look-ahead bias in a large LM at inference time via divergence decoding (a forget/retain pair of small LMs, l = l_P + a*(l_q - l_p)) and SAE feature steering. Either intervention can be used alone or the two composed."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [
+  { name = "Humzah Merchant" },
+  { name = "Bradford Levy", email = "bradford.levy@chicagobooth.edu" },
+]
+keywords = [
+  "llm",
+  "unlearning",
+  "decoding",
+  "logits-processor",
+  "vllm",
+  "knowledge-cutoff",
+  "backtesting",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "torch>=2.6",
+  # The aux engine relies on the v5 layered StaticCache API with a TENSOR
+  # write cursor (StaticLayer.cumulative_length, introduced in 5.4; plain-int
+  # in 5.0-5.3; absent in 4.x). Verified empirically: 5.4.0 passes the full
+  # engine ground-truth suite, 5.0.0 and 4.57 fail the capability probe.
+  "transformers>=5.4",
+]
+
+[project.optional-dependencies]
+vllm = ["vllm>=0.21"]            # default wheels are CUDA 13 from vllm 0.22 on
+# CUDA 12.x boxes (driver < 13.0): vllm 0.21 is the last release whose wheels are
+# CUDA-12 clean (0.22+ pull nvidia-cutlass-dsl[cu13]). Install the cu12.8 torch
+# build alongside it, e.g.:
+#   uv pip install -e ".[vllm-cu12]" --torch-backend=cu128
+#   pip install -e ".[vllm-cu12]" --extra-index-url https://download.pytorch.org/whl/cu128
+# torch cu128 runs on any 12.x driver via CUDA minor-version compatibility.
+vllm-cu12 = ["vllm>=0.21,<0.22"]
+dev = ["pytest>=8", "ruff>=0.8", "build", "twine"]
+# Evals (evals/lmeval/): run through the vendored lm-evaluation-harness. Install the
+# harness itself editable alongside this extra:
+#   uv pip install -e ".[evals]" -e "./lm-evaluation-harness[ifeval]"
+# This extra covers what our custom backends + temporal tasks need on top of lm-eval.
+evals = [
+  "datasets>=2.0",   # temporal parquet tasks + HF utility datasets (mmlu_pro/redux/gpqa)
+  "pandas",
+  "pyarrow",         # parquet prompts (temporal)
+  "accelerate",      # lm-eval imports it on the run path (hf + vllm backends)
+  "sentencepiece",   # HF tokenizers (aux/PIT) may need it
+  "tiktoken",        # chrono-gpt gpt2 tokenizer (custom backend)
+  "langdetect",      # IFEval verifier (lm-eval `ifeval` task)
+  "nltk",            # IFEval verifier
+  "immutabledict",   # IFEval verifier
+]
+
+[project.urls]
+Homepage = "https://frontiertopit.com"
+Repository = "https://github.com/fin-ai-lab/frontier-to-pit"
+Issues = "https://github.com/fin-ai-lab/frontier-to-pit/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ftp"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests", "evals", "tools"]
+# Vendored upstream — tracked but not our code: the EleutherAI lm-evaluation-harness
+# and the patched HuggingFace FlexLlama modeling file (kept close to upstream for diffs),
+# incl. the test-fixture copy under tests/fixtures/flexllama.
+extend-exclude = [
+  "lm-evaluation-harness",
+  "tools/prepare-auxiliary/flexllama_hf_patched",
+  "tests/fixtures/flexllama",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "gpu: requires a CUDA GPU and real aux checkpoints (set DD_TEST_AUX_MODEL / DD_TEST_TOKENIZER)",
+]
+addopts = "-m 'not gpu'"
