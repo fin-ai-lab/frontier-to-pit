@@ -168,23 +168,31 @@ MODELS: dict[str, dict] = {
                  "limit_mm_per_prompt": {"image": 0, "video": 0}},
         "gen_kwargs": {**QWEN_SAMPLING, "max_gen_toks": 16384}, "util_max_gen_toks": 16384,
     },
+    # The small point-in-time baselines (PIT-4B, ChronoGPT, Talkie) decode GREEDILY:
+    # utility is each backend's greedy default (no gen_kwargs), and `sqa_greedy` pins
+    # streamingqa to the same convention (short factual answers, one best guess). The
+    # sqa yaml's sampled preset applies to the models running the frontier convention.
+    # LAB tasks (ma/pharma/covid) keep their sampled leak convention for every model.
+    #
     # PIT model card claims a 2048 context window (matches the aux models -> fits 5-shot).
     "pit_4b_2015": {
         "backend": "pit", "args": {"pretrained": "Diamegs/PIT-4B-FT-201511", "max_length": 2048},
         "util_max_gen_toks": 1536,  # ~ctx window (2048) minus prompt reserve
+        "sqa_greedy": True,
     },
     "chrono_gpt_2015": {
         "backend": "chronogpt",
         "args": {"pretrained": "manelalab/chrono-gpt-instruct-v1-20151231", "max_length": 1792},
         "util_max_gen_toks": 1280,  # ~ctx window (1792) minus prompt reserve
+        "sqa_greedy": True,
     },
     # talkie-1930: a bespoke 13B GPT trained on pre-1931 text (1930 knowledge cutoff).
     # awilliamson/talkie-1930-13b-it-vllm repackages it as a custom-arch HF model
     # (TalkieForCausalLM + its own chat template), so we run it on the stock vllm backend
     # via the transformers fallback (model_impl="transformers" + trust_remote_code). bf16
-    # only (fp8 is broken on this arch); native 2048 ctx fits 5-shot. The temporal tasks
-    # already sample at T=0.7 (the card warns greedy loops, so greedy utility runs may
-    # want do_sample too — left at the task defaults for now).
+    # only (fp8 is broken on this arch); native 2048 ctx fits 5-shot. LAB tasks sample
+    # at T=0.7 per their yamls (NB the card warns greedy can loop; utility + streamingqa
+    # run greedy like the other PiT baselines, and sqa's 64-token budget bounds any loop).
     "talkie_1930_13b": {
         "backend": "vllm",
         # custom-arch (TalkieForCausalLM) needs trust_remote_code; the XET HF-cache doesn't
@@ -196,6 +204,7 @@ MODELS: dict[str, dict] = {
                  "gpu_memory_utilization": 0.85, "dtype": "bfloat16",
                  "trust_remote_code": True},
         "util_max_gen_toks": 1536,  # ~ctx window (2048) minus prompt reserve
+        "sqa_greedy": True,
     },
 }
 
@@ -827,6 +836,11 @@ def run_task(inst, spec, task_name, *, tm, args, alpha) -> None:
         gen_kwargs = dict(spec["util_gen_kwargs"])
     if not is_temporal and spec.get("util_max_gen_toks"):
         gen_kwargs["max_gen_toks"] = spec["util_max_gen_toks"]
+    # sqa_greedy models (the small PiT baselines) answer streamingqa greedily — the same
+    # one-best-guess decoding as their utility runs. Merged per-key over the task yaml,
+    # so its 64-token budget stays; penalties off (meaningless/harmful at greedy).
+    if spec.get("sqa_greedy") and task_name.startswith("streamingqa"):
+        gen_kwargs.update({"do_sample": False, "temperature": 0.0, "repetition_penalty": 1.0})
     # GPQA cot_zeroshot elicits long step-by-step reasoning that the general util cap truncates
     # (no-think Qwen @4096 loses ~1/3 of legit answers); a spec can set a bigger GPQA-only budget.
     if task_name == "gpqa_diamond_cot_zeroshot" and spec.get("gpqa_max_gen_toks"):
