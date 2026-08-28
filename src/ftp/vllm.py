@@ -19,7 +19,8 @@ Library usage (preferred)::
 ``vllm serve`` usage (environment fallback)::
 
     DD_AUX_P=... DD_AUX_Q=... vllm serve <model> \\
-        --logits-processors ftp.vllm:DDLogitsProcessor
+        --logits-processors ftp.vllm:DDLogitsProcessor \\
+        --no-async-scheduling
 
 Per-request via ``SamplingParams.extra_args``:
   ``dd_alpha`` (float) — DD strength; ``0.0`` = pure-P baseline with zero aux
