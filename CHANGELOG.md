@@ -62,6 +62,15 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **DD auxiliary overlap was effectively disabled by vLLM async scheduling.**
+  The async scheduler exposes the preceding sampled token as a `-1` placeholder
+  when DD's `update_state()` tries to prefetch the paired auxiliary forward, so
+  the processor fell back to running that forward serially after the base model.
+  Measured prefetch hits were 1.6% with async scheduling and 100% with synchronous
+  scheduling. DD serving and lm-eval paths now disable async scheduling, direct
+  `DDLogitsProcessor` integrations reject it with a clear error, and the library
+  example documents the required setting.
+
 - **README stated the DD formula with the operands swapped** — `l_P + α·(l_forget
   − l_retain)`, which is the sign that would ADD the post-cutoff knowledge. The
   implementation is and always was `l_P + α·(l_q − l_p)` with `aux_q` = retain and

@@ -14,6 +14,7 @@ import pytest
 pytest.importorskip("vllm")  # serve/steering_worker pull in vLLM interfaces
 
 from ftp import steering_worker
+from ftp.config import DDConfig
 from ftp.serve import SteerArgs, _common_kwargs, parse_steer
 
 TRIPLES = [(48, 28961, 35.0), (27, 24365, 20.0)]
@@ -107,6 +108,43 @@ def test_precapture_is_the_default_route():
 
     assert inspect.signature(build_llm).parameters["steer_precapture"].default is True
     assert inspect.signature(build_async_llm).parameters["steer_precapture"].default is True
+
+
+def test_dd_disables_async_scheduling_for_aux_overlap():
+    """Async output placeholders prevent update_state-time aux prefetch."""
+    dd = DDConfig(aux_p="forget", aux_q="retain")
+    kw = _common_kwargs(
+        "model",
+        dd_cfg=dd,
+        steering=False,
+        tp=1,
+        gpu_mem=0.9,
+        max_len=2048,
+    )
+    assert kw["async_scheduling"] is False
+
+    base_kw = _common_kwargs(
+        "model",
+        dd_cfg=None,
+        steering=False,
+        tp=1,
+        gpu_mem=0.9,
+        max_len=2048,
+    )
+    assert "async_scheduling" not in base_kw
+
+
+def test_build_llm_rejects_async_scheduling_with_dd():
+    """Callers cannot silently override the overlap-safe DD default."""
+    from ftp.serve import build_llm
+
+    with pytest.raises(ValueError, match="incompatible with DD auxiliary overlap"):
+        build_llm(
+            "model",
+            aux_p="forget",
+            aux_q="retain",
+            async_scheduling=True,
+        )
 
 
 def test_install_steering_refuses_non_eager_engine():

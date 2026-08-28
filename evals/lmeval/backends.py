@@ -844,6 +844,11 @@ class DDVLLM(VLLM):
             procs.append(GuardLogitsProcessor)
         if procs:
             kwargs.setdefault("logits_processors", procs)
+        if self._dd:
+            # DD prefetch consumes the preceding sampled token in update_state().
+            # vLLM async scheduling exposes -1 there, forcing every aux forward
+            # onto the serial apply() path (measured prefetch hit rate: 1.6%).
+            kwargs.setdefault("async_scheduling", False)
         # Prefix caching stays OFF even with the guard (a rollback re-prefills
         # prompt + accepted tokens in full): retries are the rare path, and keeping
         # the engine config byte-identical to the unguarded production arm means a

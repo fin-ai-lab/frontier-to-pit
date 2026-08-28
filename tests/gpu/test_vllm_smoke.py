@@ -54,6 +54,7 @@ def test_vllm_stress_smoke(cuda_device, p_model_path, aux_model_path):
         max_num_seqs=16,
         logits_processors=[make_processor(cfg)],
         enable_prefix_caching=False,
+        async_scheduling=False,
         trust_remote_code=True,
     )
     # Multimodal P models (e.g. Qwen3.5-VL hybrids, gemma-4 audio+vision) need

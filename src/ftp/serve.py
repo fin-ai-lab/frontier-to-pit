@@ -162,6 +162,14 @@ def _common_kwargs(model, *, dd_cfg, steering, tp, gpu_mem, max_len,
         kw.update(steer_precapture_kwargs(steer_precapture))
     procs = []
     if dd_cfg is not None:
+        # vLLM's async scheduler inserts ``-1`` output-token placeholders before
+        # the next model forward. DD's aux prefetch runs from update_state(), so
+        # those placeholders make it miss the prefetch and execute the aux
+        # forward serially in apply(). Measured on vLLM 0.21: 1.6% prefetch hits
+        # with async scheduling versus 100% without, with no steady-state base-P
+        # throughput loss. Keep scheduling synchronous until DD consumes sampled
+        # token IDs directly from vLLM's GPU request state.
+        kw["async_scheduling"] = False
         # Ship the module-level (picklable) processor class + config via DD_* env.
         # vLLM spawns the engine-core whenever CUDA is already initialized (e.g.
         # FP8 device-capability probing initializes it before the fork point), and
@@ -233,7 +241,16 @@ def build_llm(
             "llm_kwargs sets worker_cls/enforce_eager on a steer_precapture build — "
             "that clobbers DDSteeringWorker and serves silently unsteered; drop them "
             "or pass steer_precapture=False for the eager post-build route")
+    if dd_cfg is not None and llm_kwargs.get("async_scheduling") is True:
+        raise ValueError(
+            "async_scheduling=True is incompatible with DD auxiliary overlap: "
+            "vLLM output placeholders force the aux forward onto the serial path"
+        )
     kw.update(llm_kwargs)
+    if dd_cfg is not None:
+        # Treat an explicit None like the vLLM default request, not as permission
+        # to undo DD's synchronous-scheduling requirement.
+        kw["async_scheduling"] = False
     llm = LLM(**kw)
     if pairs and not steer_precapture:
         install_steering(llm, pairs)

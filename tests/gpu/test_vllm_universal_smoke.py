@@ -48,6 +48,7 @@ def test_vllm_universal_stress_smoke(cuda_device, p_model_path, aux_model_path):
         max_num_seqs=16,
         logits_processors=[make_processor(cfg)],
         enable_prefix_caching=False,
+        async_scheduling=False,
         trust_remote_code=True,
     )
     # Multimodal P models need their modalities zeroed to initialize at a

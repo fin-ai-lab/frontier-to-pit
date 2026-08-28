@@ -13,7 +13,7 @@ Library usage (preferred)::
 
     cfg = DDConfig(aux_p="fin-ai-lab/aux-2024", aux_q="fin-ai-lab/aux-2015")
     llm = LLM(model=..., logits_processors=[make_processor(cfg)],
-              enable_prefix_caching=False)
+              enable_prefix_caching=False, async_scheduling=False)
     out = llm.generate(prompts, SamplingParams(..., extra_args={"dd_alpha": 1.5}))
 
 ``vllm serve`` usage (environment fallback)::
@@ -296,6 +296,18 @@ class DDLogitsProcessor(AdapterLogitsProcessor):
                 flush=True,
             )
             return
+
+        try:
+            async_scheduling = bool(vllm_config.scheduler_config.async_scheduling)
+        except AttributeError:  # vLLM config layout drift: serve.py still pins it off
+            async_scheduling = False
+        if async_scheduling:
+            raise RuntimeError(
+                "DD requires async_scheduling=False: vLLM's async scheduler "
+                "presents -1 sampled-token placeholders during update_state(), "
+                "which prevents auxiliary prefetch and serializes the aux forward "
+                "after the base model"
+            )
 
         try:
             if vllm_config.cache_config.enable_prefix_caching:

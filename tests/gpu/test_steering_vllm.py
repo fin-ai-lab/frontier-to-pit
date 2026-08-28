@@ -121,6 +121,7 @@ def test_vllm_steering_runs_with_dd(cuda_device, steer_model_path, aux_model_pat
         max_model_len=2048,
         logits_processors=[make_processor(dd)],
         enable_prefix_caching=False,
+        async_scheduling=False,
     )
     sp = vllm.SamplingParams(temperature=0.0, max_tokens=40, extra_args={"dd_alpha": 1.5})
     prompt = "The capital of France is"

@@ -104,6 +104,7 @@ def test_vllm_split_smoke(second_gpu, aux_model_path, fuse):
         max_num_seqs=16,
         logits_processors=[make_processor(cfg)],
         enable_prefix_caching=False,
+        async_scheduling=False,
         trust_remote_code=True,
     )
     for limit in ({"image": 0, "video": 0, "audio": 0}, {"image": 0, "video": 0}, None):
