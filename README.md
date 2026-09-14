@@ -11,8 +11,6 @@ Two interventions, usable alone or composed (we usually use both):
 - **SAE Feature Steering** — clamp interpretable features that reason from a
   historical perspective.
 
-Project page: https://frontiertopit.com
-
 ## Install
 
 ```bash
@@ -151,45 +149,3 @@ backtrack=50, decode=tok.decode)` to get the rewind-and-resample half — withou
 tripped reply simply stops at the collapse point. `run.py` wires both ends for you.
 
 Run it inside the project's environment with `uv run python your_script.py`.
-
-## Citation
-
-```text
-\cite{merchant2026divergence,merchant2026a,merchant2026forecastingllmsimprovedgeneralization}
-```
-
-```bibtex
-@inproceedings{merchant2026divergence,
-    title={Divergence Decoding: Inference-Time Unlearning via Auxiliary Models},
-    author={Humzah Merchant and Bradford Levy},
-    booktitle={Forty-third International Conference on Machine Learning},
-    year={2026},
-    url={https://openreview.net/forum?id=JPbp2S9yTO}
-}
-@inproceedings{merchant2026a,
-    title={A Fast and Effective Solution to the Problem of Look-ahead Bias in {LLM}s},
-    author={Humzah Merchant and Bradford Levy},
-    booktitle={NeurIPS 2025 Workshop: Generative AI in Finance},
-    year={2026},
-    url={https://openreview.net/forum?id=zYsLIPgM28}
-}
-@inproceedings{merchant2026forecastingllmsimprovedgeneralization,
-    title={Forecasting With {LLM}s: Improved Generalization Through Feature Steering},
-    author={Humzah Merchant and Bradford Levy},
-    booktitle={Forecasting as a New Frontier of Intelligence},
-    year={2026},
-    eprint={2606.27199},
-    archivePrefix={arXiv},
-    primaryClass={cs.CL},
-    url={https://arxiv.org/abs/2606.27199}
-}
-```
-
-## Troubleshooting
-
-**`CUDA error 802: system not yet initialized`** (or engine-core fails to start on a
-multi-GPU box): the NVLink fabric manager isn't running — common on misprovisioned
-NVSwitch instances. Start it with `sudo systemctl start nvidia-fabricmanager`; if that
-also fails, the box is bad — spin up a fresh one.
-
-Apache-2.0 (see `LICENSE`).
