@@ -43,8 +43,8 @@ results_readable/
 # Editor / OS
 .DS_Store
 
-# Lab-internal tooling and local notes: kept locally, never tracked in the public
-# repo. The website (index.html, assets/) lives in fin-ai-lab/frontier-to-pit-website.
+# Internal tooling and local notes: kept locally, never tracked in the public
+# repo. The website (index.html, assets/) lives in a separate repo.
 tools/
 docs/
 scripts/

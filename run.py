@@ -70,8 +70,8 @@ from ftp.serve import (
 
 DEFAULT_MODEL = "Qwen/Qwen3.5-27B"  # bf16 — the benchmarked P precision (evals/lmeval)
 DEFAULT_MODEL_FP8 = "Qwen/Qwen3.5-27B-FP8"  # optional FP8 via --model (unbenchmarked w/ DD+steer)
-DEFAULT_AUX_P = "fin-ai-lab/aux-2024"  # forget (le2025, HAS post-cutoff knowledge)
-DEFAULT_AUX_Q = "fin-ai-lab/aux-2015"  # retain (le2015, LACKS it)
+DEFAULT_AUX_P = "anon/aux-2024"  # forget (le2025, HAS post-cutoff knowledge)
+DEFAULT_AUX_Q = "anon/aux-2015"  # retain (le2015, LACKS it)
 DEFAULT_SAE_REPO = "Qwen/SAE-Res-Qwen3.5-27B-W80K-L0_50"
 DEFAULT_SAE_CACHE = os.environ.get(
     "FTP_SAE_CACHE", os.path.expanduser("~/.cache/qwen-scope-saes")

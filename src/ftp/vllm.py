@@ -11,7 +11,7 @@ Library usage (preferred)::
     from ftp import DDConfig
     from ftp.vllm import make_processor
 
-    cfg = DDConfig(aux_p="fin-ai-lab/aux-2024", aux_q="fin-ai-lab/aux-2015")
+    cfg = DDConfig(aux_p="anon/aux-2024", aux_q="anon/aux-2015")
     llm = LLM(model=..., logits_processors=[make_processor(cfg)],
               enable_prefix_caching=False, async_scheduling=False)
     out = llm.generate(prompts, SamplingParams(..., extra_args={"dd_alpha": 1.5}))

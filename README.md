@@ -11,14 +11,21 @@ Two interventions, usable alone or composed (we usually use both):
 - **SAE Feature Steering** — clamp interpretable features that reason from a
   historical perspective.
 
+> **Anonymized copy — this will not run as-is.** Everything identifying has been
+> stripped for double-blind review: authors, affiliations, project page, repository
+> URLs and citations are gone, and the two auxiliary DD models are referred to by the
+> placeholders `anon/aux-2024` (forget) and `anon/aux-2015` (retain). **Those Hub repos
+> do not exist**, so any command below that uses DD will fail at model download. Point
+> `--aux-p` / `--aux-q` (or `aux_p=` / `aux_q=` in Python) at your own forget/retain
+> checkpoints, or run steering-only with `--no-dd`. Everything else — the code, the
+> defaults, the documented behaviour — is unmodified.
+
 ## Install
 
 ```bash
 # uv (skip if you already have it): https://docs.astral.sh/uv/
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-git clone https://github.com/fin-ai-lab/frontier-to-pit
-cd frontier-to-pit
 uv sync --extra vllm
 ```
 
@@ -118,8 +125,8 @@ from vllm import SamplingParams
 
 llm, _ = build_llm(
     "Qwen/Qwen3.5-27B",            # bf16 — the benchmarked P precision
-    aux_p="fin-ai-lab/aux-2024",   # DD forget (has post-cutoff knowledge)
-    aux_q="fin-ai-lab/aux-2015",   # DD retain
+    aux_p="anon/aux-2024",         # DD forget (has post-cutoff knowledge)
+    aux_q="anon/aux-2015",         # DD retain
     # feature steering, baked in at build
     steer=SteerArgs(parse_steer("48:28961:10,20:60183:10"),
                     sae_repo="Qwen/SAE-Res-Qwen3.5-27B-W80K-L0_50"),

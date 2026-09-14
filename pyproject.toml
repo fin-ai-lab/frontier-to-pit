@@ -10,10 +10,6 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
-authors = [
-  { name = "Humzah Merchant" },
-  { name = "Bradford Levy", email = "bradford.levy@chicagobooth.edu" },
-]
 keywords = [
   "llm",
   "unlearning",
@@ -66,11 +62,6 @@ evals = [
   "nltk",            # IFEval verifier
   "immutabledict",   # IFEval verifier
 ]
-
-[project.urls]
-Homepage = "https://frontiertopit.com"
-Repository = "https://github.com/fin-ai-lab/frontier-to-pit"
-Issues = "https://github.com/fin-ai-lab/frontier-to-pit/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ftp"]
