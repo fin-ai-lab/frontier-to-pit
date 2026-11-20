@@ -743,6 +743,52 @@ class ChronoGPTLM(LM):
 # ─────────────── DD + steering vLLM backend (deferred; only for ftp_qwen) ───────────────
 
 
+# DatedGPT (datedgpt/datedgpt-2015-instruct) ships a Llama-2 [INST] chat_template.jinja
+# that HARDCODES a literal "<s>" before "[INST]". How the TEXT "<s>[INST]" tokenizes is
+# transformers-version dependent for this SentencePiece/legacy=False tokenizer:
+#   transformers 4.57 -> [1, 518 '▁[', 25580, 29962, ...]
+#   transformers 5.x  -> [1, 29961 '[', 25580, 29962, ...]   <- off-distribution
+# The model was SFT'd with LLaMA-Factory's llama2 template, which emits the BOS *id* and
+# encodes "[INST] ..." separately -> [1, 518, ...] under every version (also the original
+# Llama-2 format). We render the SAME template minus the literal first-turn "<s>"; the
+# prompt then lacks the BOS-prefix string, so VLLM.tok_encode encodes it with
+# add_special_tokens=True (add_bos_token=True) and the tokenizer prepends the BOS id:
+# exactly one BOS, then 518, on any transformers version. Later turns keep a literal
+# "<s>" (multi-turn only; unused here since fewshot_as_multiturn=False).
+DATEDGPT_CHAT_TEMPLATE = (
+    "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}"
+    "{% set system_message = messages[0]['content'] %}{% else %}"
+    "{% set loop_messages = messages %}{% endif %}"
+    "{% for message in loop_messages %}"
+    "{% if loop.index0 == 0 and system_message is defined %}"
+    "{% set content = '<<SYS>>\n' + system_message + '\n<</SYS>>\n\n' + message['content'] %}"
+    "{% else %}{% set content = message['content'] %}{% endif %}"
+    "{% if message['role'] == 'user' %}"
+    "{{ ('' if loop.index0 == 0 else '<s>') + '[INST] ' + content + ' [/INST]' }}"
+    "{% elif message['role'] == 'assistant' %}{{ content + '</s>' }}{% endif %}"
+    "{% endfor %}"
+)
+
+
+@register_model("datedgpt")
+class DatedGPTVLLM(VLLM):
+    """Stock lm-eval vLLM with the version-independent DatedGPT prompt encoding."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs["add_bos_token"] = True
+        super().__init__(*args, **kwargs)
+        self.hf_chat_template = DATEDGPT_CHAT_TEMPLATE
+        # Fail loudly if this transformers build would not produce [BOS, '▁[', ...].
+        probe = self.apply_chat_template([{"role": "user", "content": "x"}])
+        ids = self.tok_encode(probe)
+        bos = self.tokenizer.bos_token_id
+        lead = self.tokenizer.convert_tokens_to_ids("▁[")
+        if ids[:2] != [bos, lead] or ids.count(bos) != 1:
+            raise RuntimeError(
+                f"DatedGPT prompt encodes as {ids[:6]}; expected [{bos}, {lead}, ...]"
+            )
+
+
 @register_model("dd")
 class DDVLLM(VLLM):
     """Divergence Decoding (+ optional SAE steering) on the stock vLLM backend.

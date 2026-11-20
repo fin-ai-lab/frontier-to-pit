@@ -43,6 +43,7 @@ deferred — it needs an 80 GB GPU):
 | `qwen3_5_2b` | stock `vllm` | capability-ceiling reference (vision pinned out) |
 | `pit_4b_2015`, `pit_4b_2024` | `pit` (HF) | custom `PITForCausalLM`; **batch-safe attention patch** lets it run at a large hardcoded `batch_size` (per-GPU) despite ignoring the padding mask + having no KV cache. Alpaca `### Instruction` prompt |
 | `chrono_gpt_2015`, `chrono_gpt_2024` | `chronogpt` | bespoke modded-nanogpt, tiktoken — not vLLM/HF-loadable, so a thin custom `LM` wraps its loader + `generate` |
+| `datedgpt_2015` | `datedgpt` (stock `vllm` subclass) | DatedGPT-2015-Instruct (1.3B Llama, 2048 ctx). Its template hardcodes `<s>`, whose text tokenization differs across transformers 4/5; the backend renders it BOS-free so the tokenizer adds the BOS id → `[1, 518 "▁[", …]` (the training form) on any version, asserted at startup. Revision pinned |
 | `ftp_qwen_v1` *(deferred)* | `dd` | Divergence Decoding (+ optional SAE steering); two arms (α=1.5 / 0.0) from one engine load |
 
 All per-model knobs (paths, templates, fewshot caps, generation budget) are hardcoded in
