@@ -216,8 +216,9 @@ MODELS: dict[str, dict] = {
     # transformers 4.x vs 5.x (518 '▁[' vs 29961 '['). The `datedgpt` backend renders the
     # template without the literal first "<s>" and lets the tokenizer add the BOS id, so
     # every run encodes [BOS, 518, ...] (the LLaMA-Factory llama2 training form) on any
-    # transformers version, and it asserts this at startup. The template ignores add_generation_prompt
-    # (the prompt already ends at "[/INST]") and supports a system turn via <<SYS>>, but
+    # transformers version, and it asserts this at startup. The template ignores
+    # add_generation_prompt (the prompt already ends at "[/INST]") and supports a system turn
+    # via <<SYS>>, but
     # like the other PiT baselines it reads the *_nosystemprompt LAB twins. Revision is
     # PINNED: the card notes a 2026-10-14 in-place checkpoint swap (new SFT recipe).
     "datedgpt_2015": {

@@ -784,7 +784,9 @@ class DatedGPTVLLM(VLLM):
         bos = self.tokenizer.bos_token_id
         lead = self.tokenizer.convert_tokens_to_ids("▁[")
         if ids[:2] != [bos, lead] or ids.count(bos) != 1:
-            raise RuntimeError(f"DatedGPT prompt encodes as {ids[:6]}; expected [{bos}, {lead}, ...]")
+            raise RuntimeError(
+                f"DatedGPT prompt encodes as {ids[:6]}; expected [{bos}, {lead}, ...]"
+            )
 
 
 @register_model("dd")
