@@ -38,6 +38,8 @@ TEMPORAL_DIR = str(Path(__file__).resolve().parent / "tasks" / "temporal")
 
 # Main DD model P (Qwen3.5-27B). Override with a local path on boxes w/o the HF cache.
 QWEN27B = os.environ.get("DD_QWEN27B_DIR", "Qwen/Qwen3.5-27B")
+# datedgpt/datedgpt-2015-instruct, pinned (the repo was re-uploaded in place 2026-10-14).
+DATEDGPT_2015_REV = "09dcadf9e2c091ec5b9ab5edf58c284cd3250469"
 
 # Belt-and-suspenders <think> ban for Qwen3.5 models (sampler-level, merged into
 # every task's generation_kwargs). enable_thinking=False already emits the empty
@@ -203,6 +205,27 @@ MODELS: dict[str, dict] = {
                  "model_impl": "transformers", "max_model_len": 2048,
                  "gpu_memory_utilization": 0.85, "dtype": "bfloat16",
                  "trust_remote_code": True},
+        "util_max_gen_toks": 1536,  # ~ctx window (2048) minus prompt reserve
+        "sqa_greedy": True,
+    },
+    # DatedGPT-2015-Instruct: a ~1.3B Llama trained only on data through 2015 (2048 ctx,
+    # 32K SentencePiece vocab). Plain LlamaForCausalLM, so stock vllm. CHAT TEMPLATE: the
+    # repo's chat_template.jinja is Llama-2 [INST] style and HARDCODES a leading "<s>",
+    # while the tokenizer also has add_bos_token=True — tokenizing the rendered prompt
+    # naively gives a DOUBLE BOS, and the TEXT "<s>[INST]" also tokenizes differently on
+    # transformers 4.x vs 5.x (518 '▁[' vs 29961 '['). The `datedgpt` backend renders the
+    # template without the literal first "<s>" and lets the tokenizer add the BOS id, so
+    # every run encodes [BOS, 518, ...] (the LLaMA-Factory llama2 training form) on any
+    # transformers version, and it asserts this at startup. The template ignores add_generation_prompt
+    # (the prompt already ends at "[/INST]") and supports a system turn via <<SYS>>, but
+    # like the other PiT baselines it reads the *_nosystemprompt LAB twins. Revision is
+    # PINNED: the card notes a 2026-10-14 in-place checkpoint swap (new SFT recipe).
+    "datedgpt_2015": {
+        "backend": "datedgpt",  # stock vllm + version-independent prompt encoding (backends.py)
+        "args": {"pretrained": "datedgpt/datedgpt-2015-instruct",
+                 "revision": DATEDGPT_2015_REV, "tokenizer_revision": DATEDGPT_2015_REV,
+                 "max_model_len": 2048, "gpu_memory_utilization": 0.85,
+                 "dtype": "bfloat16"},
         "util_max_gen_toks": 1536,  # ~ctx window (2048) minus prompt reserve
         "sqa_greedy": True,
     },
